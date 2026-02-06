@@ -1,0 +1,354 @@
+@startuml HeteroClient_GPU_Support_Architecture
+
+' ============================================================================
+' UML Class Diagram: GPU Support for HeteroClient MGetH2D/MSetD2H
+' Shows modifications needed to add GPU support alongside existing NPU support
+' ============================================================================
+
+skinparam classFontSize 10
+skinparam packageStyle rectangle
+skinparam backgroundColor #FEFEFE
+
+' Color coding for change types
+skinparam class {
+    BackgroundColor<<NEW>> LightGreen
+    BackgroundColor<<MODIFIED>> LightYellow
+    BackgroundColor<<EXISTING>> White
+    BorderColor<<NEW>> Green
+    BorderColor<<MODIFIED>> Orange
+    BorderColor<<EXISTING>> Black
+}
+
+package "Client API Layer" <<EXISTING>> {
+    class HeteroClient <<EXISTING>> {
+        - impl_: shared_ptr<ObjectClientImpl>
+        --
+        + MGetH2D(keys, devBlobList, failedKeys, subTimeoutMs): Status
+        + MSetD2H(keys, devBlobList, setParam): Status
+    }
+}
+
+package "Core Implementation Layer" {
+    class ObjectClientImpl <<EXISTING>> {
+        - devOcImpl_: ClientDeviceObjectManager
+        - workerApi_: vector<shared_ptr<IClientWorkerApi>>
+        - asyncGetRPCPool_: ThreadPool
+        - asyncGetCopyPool_: ThreadPool
+        - asyncSetRPCPool_: ThreadPool
+        --
+        + MGetH2D(keys, devBlobList, timeoutMs, recorderKey): shared_future<AsyncResult>
+        + MSet(keys, devBlobList, setParam, recorderKey): shared_future<AsyncResult>
+        + Get(objectKeys, timeoutMs, bufferList, queryL2Cache, isRH2DSupported): Status
+        + MultiCreate(objectKeys, dataSizeList, param, skipCheckExistence, bufferList, exists): Status
+        + MultiPublish(bufferList, setParam, blobSizes): Status
+        - **DeviceDataCreate**(objectKeys, devBlobList, setParam, bufferList, exists): Status
+        - **HostDataCopy2Device**(devBlobList, existBufferList): Status
+        - GetBuffersFromWorker(workerApi, getParam, objectBuffers): Status
+        - MGetAsyncRpcThread(asyncResource): void
+        ..
+        负责MGetH2D和MSetD2H的具体实现，不需要修改
+    }
+
+    class ClientDeviceObjectManager <<MODIFIED>> {
+        - swapInPool_: shared_ptr<IAsyncMemCopyPool>
+        - swapOutPool_: shared_ptr<IAsyncMemCopyPool>
+        - devInterImpl_: shared_ptr<DeviceManagerBase>
+        --
+        + MemCopyBetweenDevAndHost(devBlobList, bufferList, memcpyKind): Status
+        + GetDeviceManager(): shared_ptr<DeviceManagerBase>
+        ..
+        **MODIFIED**: 将AsyncAclMemCopyPool改为IAsyncMemCopyPool类型
+        以支持NPU和GPU两种内存拷贝池
+    }
+
+    interface IAsyncMemCopyPool <<NEW>> {
+        + MemcpyBatchH2D(devBlobList, bufferList): Status
+        + MemcpyBatchD2H(devBlobList, bufferList): Status
+        + MemcpyBatch(dst, src, size, kind, stream): Status
+        ..
+        **NEW**: Memory Copy的抽象接口，NPU和GPU都要实现这个接口
+        MemcpyBatchH2D和MemcpyBatchD2H与NPU的FFTS有关，
+        不确定GPU是否有类似机制，先实现MemcpyBatch接口
+    }
+
+    class AsyncAclMemCopyPool <<EXISTING>> {
+        - copyPool_: ThreadPool
+        - h2hCopyPool_: ThreadPool
+        - fftsCopyPool_: ThreadPool
+        - copyStreams_: vector<aclrtStream>
+        - deviceNow_: int32_t
+        - devInterImpl_: DeviceManagerBase*
+        - aclResourceMgr_: AclResourceManager*
+        --
+        + MemcpyBatchH2D(devBlobList, bufferList): Status
+        + MemcpyBatchD2H(devBlobList, bufferList): Status
+        - AclMemcpyAsync(dst, src, size, kind, stream): Status
+    }
+
+    class AsyncCudaMemCopyPool <<NEW>> {
+        - copyStreams_: vector<cudaStream_t>
+        - devInterImpl_: DeviceManagerBase*
+        - deviceNow_: int32_t
+        --
+        + MemcpyBatchH2D(devBlobList, bufferList): Status
+        + MemcpyBatchD2H(devBlobList, bufferList): Status
+        - CudaMemcpyAsync(dst, src, size, kind, stream): Status
+        ..
+        **NEW**: GPU implementation
+        Uses CUDA API (GPU Direct Storage)
+    }
+}
+
+package "Device Abstraction Layer" {
+    abstract class DeviceManagerBase <<EXISTING>> {
+        # deviceId_: int32_t
+        --
+        + {abstract} GetDeviceId(): int32_t
+        + {abstract} SetDevice(): Status
+        + {abstract} SynchronizeDevice(): Status
+        + {abstract} Malloc(size, ptr): Status
+        + {abstract} Free(ptr): Status
+        + {abstract} Memcpy(dst, src, size, kind): Status
+        + {abstract} MemcpyAsync(dst, src, size, kind, stream): Status
+        + {abstract} CreateStream(stream): Status
+        + {abstract} DestroyStream(stream): Status
+        + {abstract} SynchronizeStream(stream): Status
+        + {abstract} CreateEvent(event): Status
+        + {abstract} RecordEvent(event, stream): Status
+        + {abstract} CommInitRootInfo(rootInfo, rank, size, comm): Status
+        + {abstract} CommSend(data, count, dataType, peer, comm, stream): Status
+        + {abstract} CommRecv(data, count, dataType, peer, comm, stream): Status
+        ..
+        **EXISTING**: GPU和NPU设备接口的抽象层
+    }
+
+    class AclDeviceManager <<EXISTING>> {
+        - instance_: AclDeviceManager*
+        - pluginHandle_: void*
+        --
+        + GetDeviceId(): int32_t
+        + SetDevice(): Status
+        + SynchronizeDevice(): Status
+        --内存操作--
+        + Malloc/Free/Memcpy/MemcpyAsync(): Status
+        --流操作--
+        + CreateStream/DestroyStream(): Status
+        --事件操作--
+        + CreateEvent/RecordEvent(): Status
+        --HCCL操作--
+        + CommInitRootInfo/CommSend/CommRecv(): Status
+        --P2P操作--
+        + P2PCommInitRootInfo/P2PSend/P2PRecv(): Status
+        ..
+        **EXISTING**: NPU implementation，单例模式
+        Uses ACL + HCCL + P2P-Transfer library
+        动态加载libacl_plugin.so
+    }
+
+    class CudaDeviceManager <<MODIFIED>> {
+        - instance_: CudaDeviceManager*
+        --
+        + GetDeviceId(): int32_t
+        + SetDevice(): Status
+        + SynchronizeDevice(): Status
+        + Malloc/Free/Memcpy/MemcpyAsync(): Status
+        + CreateStream/DestroyStream(): Status
+        + CreateEvent/RecordEvent(): Status
+        + CommInitRootInfo/CommSend/CommRecv(): Status
+        + P2PCommInitRootInfo/P2PSend/P2PRecv(): Status
+        ..
+        **MODIFIED**: 需要实现SetDevice、CreateStream、
+        MemcpyAsync、SynchronizeStream等核心方法
+    }
+
+    class DeviceManagerFactory <<EXISTING>> {
+        --
+        + {static} GetDeviceManager(): DeviceManagerBase*
+        + {static} IsNpuEnabled(): bool
+        + {static} IsGpuEnabled(): bool
+        + {static} GetBackendName(): const char*
+        + {static} GetDeviceType(): DeviceType
+    }
+}
+
+package "RPC Communication Layer" <<EXISTING>> {
+    interface IClientWorkerApi <<EXISTING>> {
+        + Get(getParam, rsp, objectBuffers): Status
+        + MultiCreate(skipCheckExistence, createParams, version, bufferList): Status
+        + MultiPublish(bufferInfoList, param, rsp, blobSizes): Status
+    }
+
+    class ClientWorkerRemoteApi <<EXISTING>> {
+        职责：实现对象缓存接口的远程RPC通信逻辑
+        性质：多重继承（IClientWorkerApi + ClientWorkerRemoteCommonApi）
+        使用ClientWorkerOCService_Stub进行对象缓存专用RPC
+        .. RPC会话 ..
+        - stub_: unique_ptr<ClientWorkerOCService_Stub>
+        ..实现所有IClientWorkerApi接口 ..
+        + Init(requestTimeoutMs, connectTimeoutMs): Status
+        + Create(objectKey, dataSize, ...): Status
+        + MultiCreate(...): Status
+        + Publish(...): Status
+        + MultiPublish(...): Status
+        + Get(...): Status
+        + CleanUpForDecreaseShmRefAfterWorkerLost(): Status
+    }
+
+}
+
+package "Remote Transfer Layer（还不确定，后面再实现GPU RH2D）" {
+    interface IRemoteDeviceTransferManager <<NEW>> {
+
+    }
+
+    class RemoteH2DManager <<MODIFIED>> {
+
+    }
+
+    class RemoteGpuTransferManager <<NEW>> {
+
+    }
+
+    class RemoteTransferFactory <<NEW>> {
+
+    }
+}
+
+package "Worker Service Layer" <<EXISTING>> {
+    class WorkerOCServiceImpl <<EXISTING>> {
+        - workerDevOcManager_: shared_ptr<WorkerDeviceOcManager>
+        --
+        + Get(request, response): Status
+        + MultiCreate(request, response): Status
+        + MultiPublish(request, response): Status
+    }
+}
+
+' ============================================================================
+' Relationships
+' ============================================================================
+
+' Composition relationships
+HeteroClient *-- ObjectClientImpl : impl_
+ObjectClientImpl *-- ClientDeviceObjectManager : devOcImpl_
+ObjectClientImpl *-- IClientWorkerApi : workerApi_
+ClientDeviceObjectManager *-- IAsyncMemCopyPool : swapInPool_\nswapOutPool_
+ClientDeviceObjectManager *-- DeviceManagerBase : devInterImpl_
+
+' Implementation relationships
+ClientWorkerRemoteApi ..|> IClientWorkerApi : implements
+AclDeviceManager --|> DeviceManagerBase : extends
+CudaDeviceManager --|> DeviceManagerBase : extends
+AsyncAclMemCopyPool ..|> IAsyncMemCopyPool : implements
+AsyncCudaMemCopyPool ..|> IAsyncMemCopyPool : implements
+RemoteH2DManager ..|> IRemoteDeviceTransferManager : implements
+RemoteGpuTransferManager ..|> IRemoteDeviceTransferManager : implements
+
+' Dependency relationships
+ObjectClientImpl ..> RemoteTransferFactory : uses
+ClientWorkerRemoteApi ..> WorkerOCServiceImpl : RPC calls
+DeviceManagerFactory ..> AclDeviceManager : creates (NPU)
+DeviceManagerFactory ..> CudaDeviceManager : creates (GPU)
+RemoteTransferFactory ..> RemoteH2DManager : creates (NPU)
+RemoteTransferFactory ..> RemoteGpuTransferManager : creates (GPU)
+ClientDeviceObjectManager ..> DeviceManagerFactory : uses
+
+' ============================================================================
+' Call Flow Notes with GPU Support
+' ============================================================================
+
+note right of HeteroClient::MGetH2D
+  **MGetH2D Call Flow (NPU Path):**
+  1. HeteroClient::MGetH2D()
+  2. → impl_->MGetH2D()
+  3. → [Async RPC] Get() → workerApi_->Get()
+  4. → [Worker] WorkerOCServiceImpl::Get()
+  5. → [Async Copy] HostDataCopy2Device()
+  6. → devOcImpl_->MemCopyBetweenDevAndHost()
+  7. → **swapInPool_->MemcpyBatch()** no FFTS
+  8. → AsyncAclMemCopyPool::AclMemcpyAsync()
+  9. → aclrtMemcpyAsync() [ACL API]
+
+  **MGetH2D Call Flow (GPU Path - NEW):**
+  1-6. Same as NPU path
+  7. → **swapInPool_->MemcpyBatch()** 
+  8. → AsyncCudaMemCopyPool::CudaMemcpyAsync()
+  9. → cudaMemcpyAsync() [CUDA API]
+
+  **Remote H2D (NPU):**
+  - RemoteH2DManager::ImportSegAndReadHostMemory()
+  - Direct NPU-to-NPU via HCCL/P2P-Transfer
+
+  **Remote H2D (GPU - NEW):**
+  - RemoteGpuTransferManager::ImportSegAndReadHostMemory()
+  - GPU Direct RDMA
+end note
+
+note right of HeteroClient::MSetD2H
+  **MSetD2H Call Flow (NPU Path):**
+  1. HeteroClient::MSetD2H()
+  2. → impl_->MSet()
+  3. → [Async Set] DeviceDataCreate()
+  4. → MultiCreate() → workerApi_->MultiCreate()
+  5. → [Worker] WorkerOCServiceImpl::MultiCreate()
+  6. → devOcImpl_->MemCopyBetweenDevAndHost()
+  7. → **swapOutPool_->MemcpyBatch()** no FFTS
+  8. → AsyncAclMemCopyPool::AclMemcpyAsync()
+  9. → aclrtMemcpyAsync() [ACL API]
+  10. → MultiPublish() → workerApi_->MultiPublish()
+  11. → [Worker] WorkerOCServiceImpl::MultiPublish()
+
+  **MSetD2H Call Flow (GPU Path - NEW):**
+  1-6. Same as NPU path
+  7. → **swapOutPool_->MemcpyBatch()**
+  8. → AsyncCudaMemCopyPool::CudaMemcpyAsync()
+  9. → cudaMemcpyAsync() [CUDA API]
+  10-11. Same as NPU path
+end note
+
+note bottom of IAsyncMemCopyPool
+  **Memory Copy Pool 抽象层:**
+
+  **NPU Implementation (AsyncAclMemCopyPool):**
+  - 对于MemcpyBatch使用SetDevice/CreateStream
+    /MemcpyAsync/SynchronizeStream等接口
+  - 使用copypool_线程池管理异步任务
+
+  **GPU Implementation (AsyncCudaMemCopyPool):**
+  - 采用类似NPU的实现
+
+end note
+
+
+note bottom of CudaDeviceManager
+  **Implementation Tasks:**
+
+  **Core Device Operations:**
+  ✓ cudaGetDeviceCount, cudaSetDevice
+  ✓ cudaMalloc, cudaFree, cudaMemcpy
+  ✓ cudaMemcpyAsync (H2D, D2H, D2D)
+  ✓ cudaStreamCreate, cudaStreamDestroy
+  ✓ cudaStreamSynchronize
+  ✓ cudaEventCreate, cudaEventRecord
+  ✓ cudaEventSynchronize, cudaEventQuery
+
+  **NCCL Collective Operations:**
+  ✓ ncclGetUniqueId → CommRootInfo
+  ✓ ncclCommInitRank
+  ✓ ncclSend, ncclRecv (P2P)
+  ✓ ncclBroadcast, ncclAllReduce (collective)
+  ✓ ncclCommDestroy
+
+  **P2P Operations:**
+  ✓ cudaIpcGetMemHandle (same node)
+  ✓ cudaIpcOpenMemHandle (same node)
+  ✓ cudaDeviceEnablePeerAccess
+  ✓ NCCL P2P for cross-node
+
+  **Not Supported (Return K_NOT_SUPPORTED):**
+  ✗ Notify operations (NPU-specific FFTS)
+  ✗ LaunchCallback (use CUDA callbacks instead)
+  ✗ ProcessReport/SubscribeReport (NPU-specific)
+end note
+
+@enduml

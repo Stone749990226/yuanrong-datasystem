@@ -1,0 +1,367 @@
+@startuml HeteroClient_GPU_GDS_Simplified
+
+' ============================================================================
+' Simplified GPU Support with GPU Direct Storage (GDS)
+' - Compile-time device selection (NPU OR GPU, not both)
+' - Skip Remote H2D implementation (RH2D)
+' - Use GPU Direct Storage (cuFileRead/cuFileWrite) instead of cudaMemcpyAsync
+' ============================================================================
+
+skinparam classAttributeIconSize 0
+skinparam classFontSize 10
+skinparam packageStyle rectangle
+
+' Color coding
+skinparam class {
+    BackgroundColor<<NEW>> LightGreen
+    BackgroundColor<<MODIFIED>> LightYellow
+    BackgroundColor<<EXISTING>> White
+    BorderColor<<NEW>> Green
+    BorderColor<<MODIFIED>> Orange
+}
+
+package "Client API Layer" <<EXISTING>> {
+    class HeteroClient <<EXISTING>> {
+        - impl_: shared_ptr<ObjectClientImpl>
+        --
+        + MGetH2D(keys, devBlobList, failedKeys, subTimeoutMs): Status
+        + MSetD2H(keys, devBlobList, setParam): Status
+    }
+}
+
+package "Core Implementation Layer" {
+    class ObjectClientImpl <<EXISTING>> {
+        - devOcImpl_: shared_ptr<ClientDeviceObjectManager>
+        - workerApi_: shared_ptr<IClientWorkerApi>
+        - asyncGetRPCPool_: ThreadPool
+        - asyncGetCopyPool_: ThreadPool
+        - asyncSetRPCPool_: ThreadPool
+        --
+        + MGetH2D(keys, devBlobList, timeoutMs, recorderKey): shared_future<AsyncResult>
+        + MSet(keys, devBlobList, setParam, recorderKey): shared_future<AsyncResult>
+        - HostDataCopy2Device(devBlobList, existBufferList): Status
+        - DeviceDataCreate(objectKeys, devBlobList, setParam, bufferList, exists): Status
+        ..
+        **EXISTING**: No changes needed
+        Calls devOcImpl_->MemCopyBetweenDevAndHost()
+    }
+
+    class ClientDeviceObjectManager <<MODIFIED>> {
+        - swapInPool_: shared_ptr<AsyncAclMemCopyPool>  // NPU build
+        - swapInPool_: shared_ptr<AsyncGdsMemCopyPool>  // GPU build
+        - swapOutPool_: shared_ptr<AsyncAclMemCopyPool> // NPU build
+        - swapOutPool_: shared_ptr<AsyncGdsMemCopyPool> // GPU build
+        - devInterImpl_: shared_ptr<DeviceManagerBase>
+        --
+        + MemCopyBetweenDevAndHost(devBlobList, bufferList, memcpyKind, enableHugeTlb): Status
+        ..
+        **MODIFIED**: Pool type changes based on compile-time flag
+        #if USE_NPU: uses AsyncAclMemCopyPool
+        #elif USE_GPU: uses AsyncGdsMemCopyPool
+    }
+
+    class AsyncAclMemCopyPool <<EXISTING>> {
+        - streams_: vector<aclrtStream>
+        - maxBatchSize_: size_t
+        --
+        + AclMemcpyBatchH2D(devBlobList, bufferList): Status
+        + AclMemcpyBatchD2H(devBlobList, bufferList): Status
+        - AclMemcpyAsync(dst, src, size, kind, stream): Status
+        ..
+        **EXISTING**: NPU implementation
+        Uses aclrtMemcpyAsync()
+    }
+
+    class AsyncGdsMemCopyPool <<NEW>> {
+        - streams_: vector<cudaStream_t>
+        - cuFileHandles_: vector<CUfileHandle_t>
+        - maxBatchSize_: size_t
+        --
+        + GdsMemcpyBatchH2D(devBlobList, bufferList): Status
+        + GdsMemcpyBatchD2H(devBlobList, bufferList): Status
+        - GdsReadAsync(devPtr, fileDesc, offset, size, stream): Status
+        - GdsWriteAsync(fileDesc, devPtr, offset, size, stream): Status
+        ..
+        **NEW**: GPU implementation with GDS
+        Uses cuFileRead/cuFileWrite for direct storage access
+        Bypasses host memory for file I/O
+    }
+}
+
+package "Device Abstraction Layer" {
+    abstract class DeviceManagerBase <<EXISTING>> {
+        # deviceId_: int32_t
+        --
+        + {abstract} GetDeviceId(): int32_t
+        + {abstract} SetDevice(): Status
+        + {abstract} Malloc(size, ptr): Status
+        + {abstract} Free(ptr): Status
+        + {abstract} Memcpy(dst, src, size, kind): Status
+        + {abstract} MemcpyAsync(dst, src, size, kind, stream): Status
+        + {abstract} CreateStream(stream): Status
+        + {abstract} SynchronizeStream(stream): Status
+        ..
+        **EXISTING**: Excellent abstraction
+        No changes needed
+    }
+
+    class AclDeviceManager <<EXISTING>> {
+        - aclContext_: aclrtContext
+        --
+        + GetDeviceId/SetDevice/Malloc/Free(): Status
+        + Memcpy/MemcpyAsync(): Status
+        + CreateStream/SynchronizeStream(): Status
+        ..
+        **EXISTING**: NPU implementation
+        No changes needed
+    }
+
+    class CudaDeviceManager <<MODIFIED>> {
+        - cudaContext_: CUcontext
+        - gdsDriver_: CUfileDriver_t
+        --
+        + GetDeviceId/SetDevice/Malloc/Free(): Status
+        + Memcpy/MemcpyAsync(): Status
+        + CreateStream/SynchronizeStream(): Status
+        + InitGdsDriver(): Status
+        + GetGdsDriver(): CUfileDriver_t
+        ..
+        **MODIFIED**: Implement CUDA operations
+        Add GDS driver initialization
+    }
+
+    class DeviceManagerFactory <<EXISTING>> {
+        --
+        + {static} GetDeviceManager(): DeviceManagerBase*
+        + {static} IsNpuEnabled(): bool
+        + {static} IsGpuEnabled(): bool
+        ..
+        **EXISTING**: Compile-time selection
+        #if USE_NPU: return AclDeviceManager
+        #elif USE_GPU: return CudaDeviceManager
+        No runtime detection needed
+    }
+}
+
+package "RPC Communication Layer" <<EXISTING>> {
+    interface IClientWorkerApi <<EXISTING>> {
+        + Get(getParam, rsp, objectBuffers): Status
+        + MultiCreate(skipCheckExistence, createParams, version, bufferList): Status
+        + MultiPublish(bufferInfoList, param, rsp, blobSizes): Status
+    }
+
+    class ClientWorkerApi <<EXISTING>> {
+        - rpcChannel_: shared_ptr<RpcChannel>
+        --
+        + Get/MultiCreate/MultiPublish(): Status
+    }
+}
+
+package "Worker Service Layer" <<EXISTING>> {
+    class WorkerOCServiceImpl <<EXISTING>> {
+        - deviceOcManager_: shared_ptr<WorkerDeviceOcManager>
+        --
+        + Get(request, response): Status
+        + MultiCreate(request, response): Status
+        + MultiPublish(request, response): Status
+    }
+}
+
+' ============================================================================
+' Relationships
+' ============================================================================
+
+HeteroClient *-- ObjectClientImpl : impl_
+ObjectClientImpl *-- ClientDeviceObjectManager : devOcImpl_
+ObjectClientImpl *-- IClientWorkerApi : workerApi_
+
+' Compile-time composition (one or the other)
+ClientDeviceObjectManager *-- AsyncAclMemCopyPool : swapInPool_\n(NPU build)
+ClientDeviceObjectManager *-- AsyncGdsMemCopyPool : swapInPool_\n(GPU build)
+ClientDeviceObjectManager *-- DeviceManagerBase : devInterImpl_
+
+AclDeviceManager --|> DeviceManagerBase : extends
+CudaDeviceManager --|> DeviceManagerBase : extends
+ClientWorkerApi ..|> IClientWorkerApi : implements
+ClientWorkerApi ..> WorkerOCServiceImpl : RPC calls
+DeviceManagerFactory ..> AclDeviceManager : creates (NPU)
+DeviceManagerFactory ..> CudaDeviceManager : creates (GPU)
+
+' ============================================================================
+' Call Flow Notes
+' ============================================================================
+
+note right of HeteroClient::MGetH2D
+  **MGetH2D Call Flow (NPU Build):**
+  1. HeteroClient::MGetH2D()
+  2. → ObjectClientImpl::MGetH2D()
+  3. → [Async RPC] workerApi_->Get()
+  4. → [Worker] WorkerOCServiceImpl::Get()
+     Returns shared memory buffer info
+  5. → [Async Copy] HostDataCopy2Device()
+  6. → devOcImpl_->MemCopyBetweenDevAndHost()
+  7. → AsyncAclMemCopyPool::AclMemcpyBatchH2D()
+  8. → aclrtMemcpyAsync(devPtr, hostPtr, size)
+     Copy from shared memory to NPU HBM
+
+  **MGetH2D Call Flow (GPU Build - NEW):**
+  1-4. Same as NPU (RPC to get buffer info)
+  5. → [Async Copy] HostDataCopy2Device()
+  6. → devOcImpl_->MemCopyBetweenDevAndHost()
+  7. → AsyncGdsMemCopyPool::GdsMemcpyBatchH2D()
+  8. → cuFileRead(devPtr, fileDesc, size, offset)
+     **Direct file → GPU memory (bypass host)**
+
+  **Key Difference:**
+  NPU: Shared memory → NPU HBM
+  GPU: File descriptor → GPU memory (GDS)
+end note
+
+note right of HeteroClient::MSetD2H
+  **MSetD2H Call Flow (NPU Build):**
+  1. HeteroClient::MSetD2H()
+  2. → ObjectClientImpl::MSet()
+  3. → DeviceDataCreate()
+  4. → workerApi_->MultiCreate()
+     Worker allocates shared memory
+  5. → devOcImpl_->MemCopyBetweenDevAndHost()
+  6. → AsyncAclMemCopyPool::AclMemcpyBatchD2H()
+  7. → aclrtMemcpyAsync(hostPtr, devPtr, size)
+     Copy from NPU HBM to shared memory
+  8. → workerApi_->MultiPublish()
+     Seal and publish objects
+
+  **MSetD2H Call Flow (GPU Build - NEW):**
+  1-4. Same as NPU (allocate shared memory)
+  5. → devOcImpl_->MemCopyBetweenDevAndHost()
+  6. → AsyncGdsMemCopyPool::GdsMemcpyBatchD2H()
+  7. → cuFileWrite(fileDesc, devPtr, size, offset)
+     **Direct GPU memory → file (bypass host)**
+  8. Same as NPU (publish objects)
+
+  **Key Difference:**
+  NPU: NPU HBM → Shared memory
+  GPU: GPU memory → File descriptor (GDS)
+end note
+
+note bottom of AsyncGdsMemCopyPool
+  **GPU Direct Storage (GDS) Implementation:**
+
+  **Initialization:**
+  - cuFileDriverOpen() - Initialize GDS driver
+  - cuFileHandleRegister() - Register file descriptors
+  - Create CUDA streams for async operations
+
+  **H2D Transfer (Host/File → Device):**
+  - cuFileRead(devPtr, fd, size, offset, stream)
+  - Direct file I/O to GPU memory
+  - Bypasses host memory entirely
+  - Reduces memory bandwidth pressure
+
+  **D2H Transfer (Device → Host/File):**
+  - cuFileWrite(fd, devPtr, size, offset, stream)
+  - Direct GPU memory to file
+  - No intermediate host buffer needed
+
+  **Benefits over cudaMemcpyAsync:**
+  - Lower latency (no host staging)
+  - Reduced memory bandwidth usage
+  - Better for large data transfers
+  - Ideal for checkpoint/cache scenarios
+
+  **Requirements:**
+  - CUDA 11.4+ with GDS support
+  - GPUDirect Storage drivers installed
+  - File system must support GDS (ext4, xfs)
+  - Shared memory backed by files (/dev/shm)
+
+  **Batch Operations:**
+  - Process multiple transfers in parallel
+  - Use stream pool for concurrency
+  - Synchronize via cudaStreamSynchronize()
+end note
+
+note bottom of CudaDeviceManager
+  **GPU Implementation Tasks:**
+
+  **Core CUDA Operations:**
+  ✓ cudaGetDeviceCount/cudaSetDevice
+  ✓ cudaMalloc/cudaFree
+  ✓ cudaMemcpy/cudaMemcpyAsync
+  ✓ cudaStreamCreate/cudaStreamDestroy
+  ✓ cudaStreamSynchronize
+  ✓ cudaEventCreate/cudaEventRecord
+
+  **GDS-Specific Operations:**
+  ✓ cuFileDriverOpen() - Init GDS driver
+  ✓ cuFileHandleRegister() - Register FDs
+  ✓ cuFileHandleDeregister() - Cleanup
+  ✓ cuFileDriverClose() - Shutdown GDS
+
+  **Not Needed (Skipped):**
+  ✗ NCCL collective operations (no RH2D)
+  ✗ CUDA IPC (no remote transfers)
+  ✗ P2P operations (single node only)
+  ✗ Notify operations (NPU-specific)
+
+  **Simplified Scope:**
+  Focus on local GPU-Host transfers only
+  Remote transfers deferred to future phase
+end note
+
+note bottom of ClientDeviceObjectManager
+  **Compile-Time Pool Selection:**
+
+  **NPU Build (USE_NPU=true):**
+  ```cpp
+  #if USE_NPU
+  swapInPool_ = std::make_shared<AsyncAclMemCopyPool>();
+  swapOutPool_ = std::make_shared<AsyncAclMemCopyPool>();
+  #endif
+  ```
+
+  **GPU Build (USE_GPU=true):**
+  ```cpp
+  #elif USE_GPU
+  swapInPool_ = std::make_shared<AsyncGdsMemCopyPool>();
+  swapOutPool_ = std::make_shared<AsyncGdsMemCopyPool>();
+  #endif
+  ```
+
+  **No Interface Abstraction Needed:**
+  Since we use compile-time selection,
+  no need for IAsyncMemCopyPool interface.
+  Simpler implementation, zero runtime overhead.
+
+  **MemCopyBetweenDevAndHost() Logic:**
+  - Calls swapInPool_->*MemcpyBatch*() methods
+  - Pool type determined at compile time
+  - Same method signature for both NPU and GPU
+end note
+
+note bottom of DeviceManagerFactory
+  **Simplified Device Selection:**
+
+  **Compile-Time Only (No Runtime Detection):**
+  ```cpp
+  #if USE_NPU
+      return acl::AclDeviceManager::Instance();
+  #elif USE_GPU
+      return cuda::CudaDeviceManager::Instance();
+  #else
+      #error "Must define USE_NPU or USE_GPU"
+  #endif
+  ```
+
+  **Build Configuration:**
+  - bash build.sh -X on (NPU build)
+  - bash build.sh -C on (GPU build)
+  - Cannot enable both simultaneously
+  - Simpler than runtime detection
+
+  **Assumption:**
+  No mixed NPU+GPU clusters
+  Each node has either NPU or GPU, not both
+end note
+
+@enduml

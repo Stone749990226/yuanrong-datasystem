@@ -1,0 +1,48 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "MSetD2H",
+  "steps": [
+    {
+      "file": "src/datasystem/client/hetero_cache/hetero_client.cpp",
+      "description": "HeteroClient::MSetD2H",
+      "line": 105,
+      "title": "HeteroClient::MSetD2H"
+    },
+    {
+      "file": "src/datasystem/client/object_cache/object_client_impl.cpp",
+      "description": "ObjectClientImpl::MSet",
+      "line": 888,
+      "title": "ObjectClientImpl::MSet"
+    },
+    {
+      "file": "src/datasystem/client/object_cache/object_client_impl.cpp",
+      "description": "ObjectClientImpl::DeviceDataCreate",
+      "line": 832,
+      "title": "ObjectClientImpl::DeviceDataCreate"
+    },
+    {
+      "file": "src/datasystem/client/object_cache/object_client_impl.cpp",
+      "description": "ObjectClientImpl::MultiCreate",
+      "line": 1095,
+      "title": "ObjectClientImpl::MultiCreate"
+    },
+    {
+      "file": "src/datasystem/client/object_cache/client_worker_api.cpp",
+      "description": "ClientWorkerRemoteApi::MultiCreate",
+      "line": 206,
+      "title": "ClientWorkerRemoteApi::MultiCreate"
+    },
+    {
+      "file": "src/datasystem/client/object_cache/device/client_device_object_manager.cpp",
+      "description": "MemCopyBetweenDevAndHost",
+      "line": 268,
+      "title": "MemCopyBetweenDevAndHost"
+    },
+    {
+      "file": "src/datasystem/client/object_cache/device/client_device_object_manager.cpp",
+      "description": "AsyncAclMemCopyPool::AclMemcpyBatch",
+      "line": 379
+    }
+  ],
+  "ref": "stone-desktop"
+}

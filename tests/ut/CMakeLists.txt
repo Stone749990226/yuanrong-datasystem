@@ -31,6 +31,18 @@ set(DS_UT_DEPEND_LIBS
         ds_worker
         )
 
+# Add ACL libraries for hetero tests
+if (BUILD_HETERO)
+    list(APPEND DS_UT_DEPEND_LIBS ${ASCEND_LIBRARY} ${HCCL_LIBRARY})
+    # Copy acl plugin shared library to the same directory of ds_ut
+    add_custom_command(
+            TARGET ds_ut POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_BINARY_DIR}/src/datasystem/common/device/ascend/plugin/libacl_plugin.so
+            ${CMAKE_BINARY_DIR}/tests/ut
+    )
+endif()
+
 #include dirs
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${PROJECT_DIR}/src)

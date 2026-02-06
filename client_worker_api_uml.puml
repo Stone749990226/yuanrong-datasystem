@@ -1,0 +1,581 @@
+@startuml ClientWorkerApi类继承关系图
+
+' ============================================================================
+' 标题和说明
+' ============================================================================
+title ClientWorkerApi类继承体系 - 客户端与Worker通信架构
+note as N1
+  <b>设计模式说明：</b>
+  1. <b>接口隔离原则</b>：通用操作和专用操作分离
+  2. <b>虚继承</b>：解决菱形继承问题
+  3. <b>分层架构</b>：属性层 → 接口层 → 实现层 → 应用层
+
+  <b>命名规范：</b>
+  • <b>I</b>开头 = Interface（纯虚接口类）
+  • <b>Remote</b> = 实现了RPC远程通信
+  • <b>Common</b> = 通用功能（所有客户端都需要）
+end note
+
+' ============================================================================
+' 第1层：属性基类（数据存储层）
+' ============================================================================
+class ClientWorkerCommonApiAttribute {
+  ' 📦 职责：存储所有客户端-Worker通信的共享属性
+  ' 📍 位置：src/datasystem/client/client_worker_common_api.h:57
+
+  .. 连接相关 ..
+  + socketFd_: atomic<int32_t>
+  + clientId_: string
+  + workerId_: string
+  + hostPort_: HostPort
+  + workerVersion_: atomic<uint32_t>
+
+  .. 共享内存配置 ..
+  + shmEnabled_: bool
+  + shmThreshold_: uint64_t
+  + decShmUnit_: shared_ptr<ShmUnitInfo>
+
+  .. 心跳和健康检查 ..
+  + heartbeatType_: HeartbeatType
+  + heartBeatIntervalMs_: int64_t
+  + healthy_: atomic_bool
+  + removable_: atomic_bool
+
+  .. 其他配置 ..
+  + enableCrossNodeConnection_: bool
+  + workerEnableP2Ptransfer_: bool
+  + lockId_: uint32_t
+
+  .. 方法 ..
+  + ShmCreateable(size): bool
+  + IncreaseInvokeCount(): void
+  + DecreaseInvokeCount(): void
+  + HaveInvokeCount(): bool
+
+  --
+  <color:blue>💡 说明：</color>
+  • 非接口类，纯数据存储
+  • 使用atomic保证线程安全
+  • 管理连接状态和配置
+}
+
+note right of ClientWorkerCommonApiAttribute
+  <b>设计亮点：</b>
+  • invokeCount_用于追踪并发调用数
+  • workerVersion_用于检测Worker重启
+  • 支持共享内存和RPC两种传输方式
+end note
+
+' ============================================================================
+' 第2层：通用接口层
+' ============================================================================
+interface IClientWorkerCommonApi {
+  ' 🎯 职责：定义所有客户端类型都需要的通用操作接口
+  ' 📍 位置：src/datasystem/client/client_worker_common_api.h:142
+  ' 🔧 性质：纯虚接口类
+
+  .. 生命周期管理 ..
+  + {abstract} Init(requestTimeoutMs, connectTimeoutMs): Status
+  + {abstract} Disconnect(isDestruct): Status
+  + {abstract} Reconnect(): Status
+
+  .. 心跳和健康检查 ..
+  + {abstract} SendHeartbeat(workerReboot, clientRemoved, ...): Status
+
+  .. 共享内存管理 ..
+  + {abstract} GetClientFd(workerFds, clientFds, tenantId): Status
+
+  .. 高可用支持 ..
+  + {abstract} GetStandbyWorkers(): vector<HostPort>
+
+  .. 认证管理 ..
+  + {abstract} UpdateToken(token): Status
+  + {abstract} UpdateAkSk(accessKey, secretKey): Status
+
+  --
+  <color:blue>💡 说明：</color>
+  • 定义了客户端与Worker通信的基础契约
+  • 所有客户端实现都必须支持这些操作
+  • 支持Token和AK/SK两种认证方式
+}
+
+note right of IClientWorkerCommonApi
+  <b>核心功能：</b>
+  1. <b>连接管理</b>：初始化、断开、重连
+  2. <b>心跳机制</b>：检测Worker状态
+  3. <b>共享内存</b>：零拷贝数据传输
+  4. <b>高可用</b>：支持standby worker切换
+  5. <b>安全认证</b>：Token/AK-SK更新
+end note
+
+' ============================================================================
+' 第3层：通用RPC实现层
+' ============================================================================
+class ClientWorkerRemoteCommonApi {
+  ' 🎯 职责：实现通用接口的远程RPC通信逻辑
+  ' 📍 位置：src/datasystem/client/client_worker_common_api.h:218
+  ' 🔧 性质：虚继承IClientWorkerCommonApi
+
+  .. RPC会话管理 ..
+  # commonWorkerSession_: unique_ptr<WorkerService_Stub>
+  # requestTimeoutMs_: int32_t
+  # rpcTimeoutMs_: int32_t
+  # workerTimeoutMult_: double
+
+  .. 认证相关 ..
+  # cred_: RpcCredential
+  # signature_: Signature*
+  # tenantId_: string
+  # clientAccessToken_: unique_ptr<ClientAccessToken>
+
+  .. 共享内存FD接收 ..
+  # recvPageThread_: Thread
+  # recvClientFdState_: RecvClientFdState
+
+  .. Standby Worker管理 ..
+  # standbyWorkerMutex_: shared_timed_mutex
+  # standbyWorkerAddrs_: unordered_set<HostPort>
+  # masterAddress_: HostPort
+
+  .. 其他 ..
+  # workerStartId_: string
+  # pageSize_: uint32_t
+  # enableExclusiveConnection_: bool
+
+  .. 实现的接口方法 ..
+  + Init(requestTimeoutMs, connectTimeoutMs): Status
+  + SendHeartbeat(...): Status
+  + GetClientFd(...): Status
+  + Disconnect(isDestruct): Status
+  + Reconnect(): Status
+  + GetStandbyWorkers(): vector<HostPort>
+  + UpdateToken(token): Status
+  + UpdateAkSk(accessKey, secretKey): Status
+
+  .. 内部辅助方法 ..
+  # Connect(req, timeoutMs, reconnection): Status
+  # RecvPageFd(): void
+  # SetRpcTimeout(timeout): void
+  # CloseSocketFd(): void
+  # SetHealthy(healthy): void
+  # RecvFdAfterNotify(...): void
+  # PostRecvPageFd(...): void
+
+  .. 模板方法 ..
+  # SetToken<ReqType>(req): Status
+  # SetTenantId<ReqType>(req): void
+  # SetTokenAndTenantId<ReqType>(req): Status
+
+  --
+  <color:blue>💡 说明：</color>
+  • 使用Protocol Buffers进行RPC通信
+  • 通过Unix domain socket传递共享内存FD
+  • 支持standby worker自动切换
+  • 独立线程接收共享内存文件描述符
+}
+
+note right of ClientWorkerRemoteCommonApi
+  <b>关键实现细节：</b>
+  1. <b>RPC Stub</b>：commonWorkerSession_
+  2. <b>FD传递</b>：recvPageThread_异步接收
+  3. <b>超时管理</b>：动态调整RPC超时
+  4. <b>认证</b>：支持Token自动刷新
+  5. <b>高可用</b>：维护standby worker列表
+end note
+
+' ============================================================================
+' 第4层：对象缓存接口层
+' ============================================================================
+interface IClientWorkerApi {
+  ' 🎯 职责：定义对象缓存（Object Cache）和KV接口的专用操作
+  ' 📍 位置：src/datasystem/client/object_cache/client_worker_api.h:84
+  ' 🔧 性质：虚继承IClientWorkerCommonApi
+
+  .. 对象生命周期 ..
+  + {abstract} Create(objectKey, dataSize, ...): Status
+  + {abstract} MultiCreate(skipCheckExistence, ...): Status
+  + {abstract} Publish(bufferInfo, isShm, isSeal, ...): Status
+  + {abstract} MultiPublish(bufferInfo, param, rsp, ...): Status
+  + {abstract} Get(getParam, version, rsp, payloads): Status
+  + {abstract} Delete(objectKeys, failedObjectKeys, ...): Status
+
+  .. 引用计数管理 ..
+  + {abstract} DecreaseWorkerRef(objectKeys): Status
+  + {abstract} GIncreaseWorkerRef(firstIncIds, ...): Status
+  + {abstract} GDecreaseWorkerRef(finishDecIds, ...): Status
+  + {abstract} ReleaseGRefs(remoteClientId): Status
+  + {abstract} QueryGlobalRefNum(objectKeys, gRefMap): Status
+
+  .. NPU设备对象操作 ..
+  + {abstract} PublishDeviceObject(bufferInfo, ...): Status
+  + {abstract} GetDeviceObject(devObjKeys, ...): Status
+  + {abstract} GetBlobsInfo(devObjKey, timeoutMs, blobs): Status
+  + {abstract} SubscribeReceiveEvent(deviceId, resp): Status
+  + {abstract} AckRecvFinish(req): Status
+
+  .. P2P传输支持 ..
+  + {abstract} PutP2PMeta(bufferInfo, blobs): Status
+  + {abstract} GetP2PMeta(bufferInfoList, ...): Status
+  + {abstract} SendRootInfo(req, resp): Status
+  + {abstract} RecvRootInfo(req, resp): Status
+  + {abstract} RemoveP2PLocation(objectKey, deviceId): Status
+
+  .. KV操作 ..
+  + {abstract} Exist(keys, exists, queryL2Cache, isLocal): Status
+  + {abstract} Expire(keys, ttlSeconds, failedKeys): Status
+  + {abstract} QuerySize(objectKeys, rsp): Status
+  + {abstract} GetObjMetaInfo(tenantId, objectKeys, objMetas): Status
+  + {abstract} GetMetaInfo(keys, isDevKey, metaInfos): Status
+
+  .. 其他 ..
+  + {abstract} InvalidateBuffer(objectKey): Status
+  + {abstract} HealthCheck(state): Status
+  + {abstract} ReconnectWorker(gRefIds): Status
+  + {abstract} CloneWith(hostPort, cred, ...): shared_ptr<IClientWorkerApi>
+
+  .. 共享内存引用计数 ..
+  + {abstract} PrepairForDecreaseShmRef(mmapFunc): Status
+  + {abstract} CleanUpForDecreaseShmRefAfterWorkerLost(): Status
+  + {abstract} DecreaseShmRef(shmId, connectCheck, shutdownMtx): Status
+  + EnableDecreaseShmRefByShmQueue(): bool
+
+  --
+  <color:blue>💡 说明：</color>
+  • 扩展了通用接口，增加对象缓存专用操作
+  • 支持普通对象和NPU设备对象
+  • 支持全局引用计数（分布式GC）
+  • 支持P2P直接传输（NPU间通信）
+}
+
+note bottom of IClientWorkerApi
+  <b>三大功能模块：</b>
+
+  <b>1. 对象缓存（Object Cache）</b>
+  • Create/Publish/Get/Delete
+  • 全局引用计数管理
+  • 支持嵌套对象依赖
+
+  <b>2. NPU设备对象（Heterogeneous Object）</b>
+  • PublishDeviceObject/GetDeviceObject
+  • P2P元数据管理（PutP2PMeta/GetP2PMeta）
+  • 设备间直接传输（HCCS/RoCE）
+
+  <b>3. KV接口</b>
+  • Exist/Expire/QuerySize
+  • TTL支持
+  • L2缓存查询
+end note
+
+' ============================================================================
+' 第5层：对象缓存RPC实现层
+' ============================================================================
+class ClientWorkerRemoteApi {
+  ' 🎯 职责：实现对象缓存接口的远程RPC通信逻辑
+  ' 📍 位置：src/datasystem/client/object_cache/client_worker_api.h:413
+  ' 🔧 性质：多重继承（IClientWorkerApi + ClientWorkerRemoteCommonApi）
+
+  .. RPC会话 ..
+  - rpcSession_: unique_ptr<ClientWorkerOCService_Stub>
+  - mmapManager_: shared_ptr<MmapManager>
+
+  .. 实现所有IClientWorkerApi接口 ..
+  + Init(requestTimeoutMs, connectTimeoutMs): Status
+  + Create(objectKey, dataSize, ...): Status
+  + MultiCreate(...): Status
+  + Publish(...): Status
+  + MultiPublish(...): Status
+  + Get(...): Status
+  + Delete(...): Status
+  + DecreaseWorkerRef(...): Status
+  + GIncreaseWorkerRef(...): Status
+  + GDecreaseWorkerRef(...): Status
+  + ReleaseGRefs(...): Status
+  + QueryGlobalRefNum(...): Status
+  + PublishDeviceObject(...): Status
+  + GetDeviceObject(...): Status
+  + GetBlobsInfo(...): Status
+  + SubscribeReceiveEvent(...): Status
+  + AckRecvFinish(...): Status
+  + PutP2PMeta(...): Status
+  + GetP2PMeta(...): Status
+  + SendRootInfo(...): Status
+  + RecvRootInfo(...): Status
+  + RemoveP2PLocation(...): Status
+  + Exist(...): Status
+  + Expire(...): Status
+  + QuerySize(...): Status
+  + GetObjMetaInfo(...): Status
+  + GetMetaInfo(...): Status
+  + InvalidateBuffer(...): Status
+  + HealthCheck(...): Status
+  + ReconnectWorker(...): Status
+  + PrepairForDecreaseShmRef(...): Status
+  + CleanUpForDecreaseShmRefAfterWorkerLost(): Status
+  + DecreaseShmRef(...): Status
+
+  + CloneWith(...): shared_ptr<IClientWorkerApi>
+
+  --
+  <color:blue>💡 说明：</color>
+  • 继承了通用RPC能力（从ClientWorkerRemoteCommonApi）
+  • 实现了对象缓存的所有接口（从IClientWorkerApi）
+  • 使用ClientWorkerOCService_Stub进行对象缓存专用RPC
+  • 管理共享内存映射（mmapManager_）
+}
+
+note right of ClientWorkerRemoteApi
+  <b>多重继承的优势：</b>
+
+  <b>从ClientWorkerRemoteCommonApi继承：</b>
+  • RPC连接管理
+  • 心跳机制
+  • 认证处理
+  • 共享内存FD传递
+
+  <b>实现IClientWorkerApi接口：</b>
+  • 对象缓存操作
+  • NPU设备对象操作
+  • KV操作
+  • P2P传输支持
+
+  <b>结果：</b>
+  完整的对象缓存客户端实现
+end note
+
+' ============================================================================
+' 第6层：流缓存应用层
+' ============================================================================
+class "ClientWorkerApi\n(stream_cache)" as StreamClientWorkerApi {
+  ' 🎯 职责：实现流缓存（Stream Cache）的专用操作
+  ' 📍 位置：src/datasystem/client/stream_cache/client_worker_api.h:45
+  ' 🔧 性质：继承ClientWorkerRemoteCommonApi
+
+  .. RPC会话 ..
+  - rpcSession_: unique_ptr<ClientWorkerSCService_Stub>
+
+  .. 生产者操作 ..
+  + CreateProducer(streamName, producerId, ...): Status
+  + QueryGlobalProducersNum(streamName, producerNum): Status
+
+  .. 消费者操作 ..
+  + Subscribe(streamName, consumerId, config, rsp): Status
+  + QueryGlobalConsumersNum(streamName, consumerNum): Status
+
+  .. 流管理 ..
+  + DeleteStream(streamName): Status
+  + ResetStreams(streamNames): Status
+  + ResumeStreams(streamNames): Status
+
+  .. 辅助方法 ..
+  + Init(timeoutMs, connectTimeoutMs): Status
+  + LogPrefix(): string
+  - GetRpcTimeout(requestedTimeout, defaultRpcTimeout): pair<int32_t, int32_t>
+
+  --
+  <color:blue>💡 说明：</color>
+  • 专门用于流式数据处理
+  • 支持生产者-消费者模式
+  • 使用ClientWorkerSCService_Stub进行流缓存专用RPC
+  • 不需要对象缓存的复杂引用计数机制
+}
+
+note right of StreamClientWorkerApi
+  <b>流缓存特点：</b>
+
+  <b>1. 生产者-消费者模型</b>
+  • CreateProducer：创建数据生产者
+  • Subscribe：订阅流数据
+
+  <b>2. 流式数据传输</b>
+  • 支持共享内存页传输
+  • 数据验证机制
+  • 流元数据管理
+
+  <b>3. 流控制</b>
+  • DeleteStream：删除流
+  • ResetStreams：重置流
+  • ResumeStreams：恢复流
+
+  <b>使用场景：</b>
+  • 实时数据管道
+  • 日志流处理
+  • 事件流分发
+end note
+
+' ============================================================================
+' 继承关系定义
+' ============================================================================
+
+' 第1层 → 第2层
+ClientWorkerCommonApiAttribute <|-- IClientWorkerCommonApi
+
+' 第2层 → 第3层（虚继承）
+IClientWorkerCommonApi <|.. ClientWorkerRemoteCommonApi : <<virtual inheritance>>
+
+' 第2层 → 第4层（虚继承）
+IClientWorkerCommonApi <|.. IClientWorkerApi : <<virtual inheritance>>
+
+' 第3层 → 第5层（多重继承）
+ClientWorkerRemoteCommonApi <|-- ClientWorkerRemoteApi
+IClientWorkerApi <|.. ClientWorkerRemoteApi
+
+' 第3层 → 第6层
+ClientWorkerRemoteCommonApi <|-- StreamClientWorkerApi
+
+' ============================================================================
+' 关系说明注释
+' ============================================================================
+
+note on link
+  <b>虚继承</b>
+  解决菱形继承问题
+  确保只有一份基类实例
+end note
+
+note "多重继承\n结合通用RPC能力\n和对象缓存接口" as N2
+ClientWorkerRemoteApi .. N2
+
+note "直接继承\n只需要通用RPC能力\n不需要对象缓存接口" as N3
+StreamClientWorkerApi .. N3
+
+' ============================================================================
+' 设计模式说明
+' ============================================================================
+
+note as DesignPattern
+  <b>🎨 设计模式总结</b>
+
+  <b>1. 接口隔离原则 (ISP)</b>
+  • IClientWorkerCommonApi：通用操作（心跳、连接、认证）
+  • IClientWorkerApi：对象缓存专用操作
+  • 流缓存直接继承通用实现，不需要额外接口层
+
+  <b>2. 虚继承解决菱形继承</b>
+  ┌─────────────────────────┐
+  │ IClientWorkerCommonApi  │ (虚基类)
+  └───────────┬─────────────┘
+              │
+       ┌──────┴──────┐
+       │             │
+       ▼             ▼
+  ClientWorker   IClientWorker
+  RemoteCommonApi    Api
+       │             │
+       └──────┬──────┘
+              ▼
+     ClientWorkerRemoteApi
+
+  使用 virtual public 确保只有一份基类实例
+
+  <b>3. 分层架构</b>
+  • <b>属性层</b>：ClientWorkerCommonApiAttribute - 数据存储
+  • <b>接口层</b>：IClientWorkerCommonApi, IClientWorkerApi - 契约定义
+  • <b>实现层</b>：ClientWorkerRemoteCommonApi, ClientWorkerRemoteApi - RPC逻辑
+  • <b>应用层</b>：ClientWorkerApi (stream_cache) - 业务逻辑
+
+  <b>4. 模板方法模式</b>
+  ClientWorkerRemoteCommonApi提供模板方法：
+  • SetToken<ReqType>
+  • SetTenantId<ReqType>
+  • SetTokenAndTenantId<ReqType>
+  子类可以复用认证逻辑
+
+  <b>5. 策略模式</b>
+  • HeartbeatType：RPC_HEARTBEAT vs UDS_HEARTBEAT
+  • 传输方式：共享内存 vs RPC
+end note
+
+' ============================================================================
+' 使用场景说明
+' ============================================================================
+note as UsageScenario
+  <b>📋 使用场景对照表</b>
+
+  <b>▶ ClientWorkerApi (stream_cache)</b>
+  • 流式数据处理  
+  • 生产者-消费者模式  
+  • 实时数据管道  
+  • 日志流、事件流  
+
+  --
+
+  <b>▶ ClientWorkerRemoteApi</b>
+  • 对象存储和 KV 缓存  
+  • KV缓存（MSet/MGet）  
+  • 对象存储（Create/Publish）  
+  • NPU设备对象支持  
+  • 分布式引用计数（全局GC）  
+
+  --
+
+  <b>▶ ClientWorkerRemoteCommonApi</b>
+  • 通用 RPC 实现基类  
+  • 提供连接管理、心跳、认证  
+  • 不直接作为业务接口使用  
+
+  --
+
+  <b>▶ IClientWorkerApi</b>
+  • 对象缓存专用接口契约  
+  • 用于多态与依赖注入  
+  • 提供对象生命周期 + 引用计数 + P2P支持  
+
+  --
+
+  <b>▶ IClientWorkerCommonApi</b>
+  • 通用接口契约（所有客户端共享）  
+  • 提供连接、心跳、认证、HA能力  
+
+  <b>💡 选择建议：</b>
+  • 流式处理 → ClientWorkerApi (stream_cache)  
+  • KV/Object存储 → ClientWorkerRemoteApi  
+  • 自定义实现 → 继承 IClientWorkerApi / IClientWorkerCommonApi  
+end note
+
+' ============================================================================
+' 关键技术点说明
+' ============================================================================
+
+note as TechnicalHighlights
+  <b>🔧 关键技术点</b>
+
+  <b>1. 零拷贝共享内存传输</b>
+  • Client通过Unix domain socket接收Worker的mmap FD
+  • 直接映射Worker的内存区域，避免数据拷贝
+  • recvPageThread_异步接收FD，不阻塞主线程
+
+  <b>2. 全局引用计数（分布式GC）</b>
+  • GIncreaseWorkerRef/GDecreaseWorkerRef
+  • 跨节点对象生命周期管理
+  • 支持嵌套对象依赖（OCNestedManager）
+
+  <b>3. NPU P2P直接传输</b>
+  • PutP2PMeta/GetP2PMeta：交换P2P元数据
+  • SendRootInfo/RecvRootInfo：协调HCCL通信
+  • 支持HBM-to-HBM直接传输（HCCS/RoCE）
+
+  <b>4. 高可用支持</b>
+  • Standby worker自动切换
+  • Worker重启检测（workerVersion_）
+  • 心跳超时自动重连
+
+  <b>5. 认证和多租户</b>
+  • Token自动刷新（ClientAccessToken）
+  • AK/SK签名认证（Signature）
+  • TenantId隔离
+
+  <b>6. 性能优化</b>
+  • 独占连接模式（enableExclusiveConnection_）
+  • 动态超时调整（workerTimeoutMult_）
+  • 批量操作（MultiCreate/MultiPublish）
+end note
+
+' ============================================================================
+' 布局调整
+' ============================================================================
+
+ClientWorkerCommonApiAttribute -[hidden]down- DesignPattern
+DesignPattern -[hidden]down- UsageScenario
+UsageScenario -[hidden]down- TechnicalHighlights
+
+@enduml

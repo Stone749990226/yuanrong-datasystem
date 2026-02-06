@@ -1,0 +1,219 @@
+@startuml HeteroClient_MGetH2D_MSetD2H_CallChain
+
+' ============================================================================
+' UML Class Diagram for HeteroClient::MGetH2D and MSetD2H Call Chain
+' ============================================================================
+
+skinparam classAttributeIconSize 0
+skinparam classFontSize 11
+skinparam packageStyle rectangle
+
+package "Client API Layer" {
+    class HeteroClient {
+        - impl_: shared_ptr<ObjectClientImpl>
+        --
+        + MGetH2D(keys, devBlobList, failedKeys, subTimeoutMs): Status
+        + MSetD2H(keys, devBlobList, setParam): Status
+        + DevMGet(keys, devBlobList, failedKeys, subTimeoutMs): Status
+        + DevMSet(keys, devBlobList, setParam): Status
+    }
+}
+
+package "Core Implementation Layer" {
+    class ObjectClientImpl {
+        - devOcImpl_: shared_ptr<ClientDeviceObjectManager>
+        - workerApi_: shared_ptr<IClientWorkerApi>
+        - mmapManager_: shared_ptr<MmapManager>
+        - asyncGetRPCPool_: ThreadPool
+        - asyncGetCopyPool_: ThreadPool
+        - asyncSetRPCPool_: ThreadPool
+        --
+        + MGetH2D(keys, devBlobList, timeoutMs, recorderKey): shared_future<AsyncResult>
+        + MSet(keys, devBlobList, setParam, recorderKey): shared_future<AsyncResult>
+        + Get(objectKeys, timeoutMs, bufferList, queryL2Cache, isRH2DSupported): Status
+        + MultiCreate(objectKeys, dataSizeList, param, skipCheckExistence, bufferList, exists): Status
+        + MultiPublish(bufferList, setParam, blobSizes): Status
+        - DeviceDataCreate(objectKeys, devBlobList, setParam, bufferList, exists): Status
+        - HostDataCopy2Device(devBlobList, existBufferList): Status
+        - GetBuffersFromWorker(workerApi, getParam, objectBuffers): Status
+        - MGetAsyncRpcThread(asyncResource): void
+    }
+
+    class ClientDeviceObjectManager {
+        - swapInPool_: shared_ptr<AsyncAclMemCopyPool>
+        - swapOutPool_: shared_ptr<AsyncAclMemCopyPool>
+        - devInterImpl_: shared_ptr<DeviceManagerBase>
+        --
+        + MemCopyBetweenDevAndHost(devBlobList, bufferList, memcpyKind): Status
+        + GetDeviceManager(): shared_ptr<DeviceManagerBase>
+    }
+
+    class AsyncAclMemCopyPool {
+        - streams_: vector<aclrtStream>
+        - maxBatchSize_: size_t
+        --
+        + AclMemcpyBatchH2D(devBlobList, bufferList): Status
+        + AclMemcpyBatchD2H(devBlobList, bufferList): Status
+        - AclMemcpyAsync(dst, src, size, kind, stream): Status
+    }
+
+    class MmapManager {
+        - mmapCache_: unordered_map<string, MmapInfo>
+        --
+        + MmapBuffer(fd, offset, size): void*
+        + UnmapBuffer(addr, size): Status
+    }
+}
+
+package "RPC Communication Layer" {
+    interface IClientWorkerApi {
+        + Get(getParam, rsp, objectBuffers): Status
+        + MultiCreate(skipCheckExistence, createParams, version, bufferList): Status
+        + MultiPublish(bufferInfoList, param, rsp, blobSizes): Status
+    }
+
+    class ClientWorkerApi {
+        - rpcChannel_: shared_ptr<RpcChannel>
+        - workerAddress_: string
+        --
+        + Get(getParam, rsp, objectBuffers): Status
+        + MultiCreate(skipCheckExistence, createParams, version, bufferList): Status
+        + MultiPublish(bufferInfoList, param, rsp, blobSizes): Status
+    }
+}
+
+package "Remote Transfer Layer" {
+    class RemoteH2DManager <<Singleton>> {
+        - p2pTransferLib_: P2PTransferLib
+        - hcclComm_: HcclComm
+        --
+        + Instance(): RemoteH2DManager&
+        + P2PCommInitRootInfo(rootInfo): Status
+        + ImportHostSegment(segmentInfo, handle): Status
+        + ScatterBatch(handles, devBlobList): Status
+        + ImportSegAndReadHostMemory(devBlobList, bufferList): Status
+    }
+}
+
+package "Worker Service Layer" {
+    class WorkerOCServiceImpl {
+        - deviceOcManager_: shared_ptr<WorkerDeviceOcManager>
+        - arena_: shared_ptr<Arena>
+        - metadataManager_: shared_ptr<OCMetadataManager>
+        --
+        + Get(request, response): Status
+        + MultiCreate(request, response): Status
+        + MultiPublish(request, response): Status
+    }
+
+    class WorkerDeviceOcManager {
+        - deviceManager_: shared_ptr<DeviceManagerBase>
+        - deviceMemoryPool_: shared_ptr<DeviceMemoryPool>
+        --
+        + AllocateDeviceMemory(size): void*
+        + FreeDeviceMemory(ptr): Status
+    }
+}
+
+package "Device Management Layer" {
+    abstract class DeviceManagerBase {
+        # deviceId_: int32_t
+        --
+        + {abstract} GetDeviceId(): int32_t
+        + {abstract} SetDevice(): Status
+        + {abstract} SynchronizeDevice(): Status
+    }
+
+    class AclDeviceManager {
+        - aclContext_: aclrtContext
+        --
+        + GetDeviceId(): int32_t
+        + SetDevice(): Status
+        + SynchronizeDevice(): Status
+        + CreateStream(): aclrtStream
+    }
+}
+
+' ============================================================================
+' Relationships
+' ============================================================================
+
+' Composition relationships
+HeteroClient *-- ObjectClientImpl : impl_
+ObjectClientImpl *-- ClientDeviceObjectManager : devOcImpl_
+ObjectClientImpl *-- IClientWorkerApi : workerApi_
+ObjectClientImpl *-- MmapManager : mmapManager_
+ClientDeviceObjectManager *-- AsyncAclMemCopyPool : swapInPool_\nswapOutPool_
+ClientDeviceObjectManager *-- DeviceManagerBase : devInterImpl_
+WorkerOCServiceImpl *-- WorkerDeviceOcManager : deviceOcManager_
+
+' Implementation relationships
+ClientWorkerApi ..|> IClientWorkerApi : implements
+AclDeviceManager --|> DeviceManagerBase : extends
+
+' Dependency relationships
+ObjectClientImpl ..> RemoteH2DManager : uses (singleton)
+ClientWorkerApi ..> WorkerOCServiceImpl : RPC calls
+
+' ============================================================================
+' Call Flow Notes
+' ============================================================================
+
+note right of HeteroClient::MGetH2D
+  **MGetH2D Call Flow:**
+  1. HeteroClient::MGetH2D()
+  2. → impl_->MGetH2D()
+  3. → [Async RPC] Get() → workerApi_->Get()
+  4. → [Worker] WorkerOCServiceImpl::Get()
+  5. → [Async Copy] HostDataCopy2Device()
+  6. → devOcImpl_->MemCopyBetweenDevAndHost()
+  7. → AsyncAclMemCopyPool::AclMemcpyBatchH2D()
+  8. → aclrtMemcpyAsync() [ACL API]
+
+  **Alternative: Remote H2D Path**
+  - RemoteH2DManager::ImportSegAndReadHostMemory()
+  - Direct NPU-to-NPU via HCCL/RoCE
+end note
+
+note right of HeteroClient::MSetD2H
+  **MSetD2H Call Flow:**
+  1. HeteroClient::MSetD2H()
+  2. → impl_->MSet()
+  3. → [Async Set] DeviceDataCreate()
+  4. → MultiCreate() → workerApi_->MultiCreate()
+  5. → [Worker] WorkerOCServiceImpl::MultiCreate()
+  6. → devOcImpl_->MemCopyBetweenDevAndHost()
+  7. → AsyncAclMemCopyPool::AclMemcpyBatchD2H()
+  8. → aclrtMemcpyAsync() [ACL API]
+  9. → MultiPublish() → workerApi_->MultiPublish()
+  10. → [Worker] WorkerOCServiceImpl::MultiPublish()
+end note
+
+note bottom of RemoteH2DManager
+  **Remote H2D Transfer:**
+  Enables direct NPU-to-NPU transfers
+  across nodes via HCCS/RoCE without
+  going through local host memory.
+
+  Used when remote H2D is enabled
+  and source data is on remote node.
+end note
+
+note bottom of AsyncAclMemCopyPool
+  **ACL Memory Operations:**
+  - Uses aclrtMemcpyAsync() for async transfers
+  - Manages NPU compute streams
+  - Supports batch operations for efficiency
+  - MemcpyKind: HOST_TO_DEVICE, DEVICE_TO_HOST
+end note
+
+note bottom of WorkerOCServiceImpl
+  **Worker RPC Handlers:**
+  - Get: Returns buffer metadata (FD, offset, size)
+  - MultiCreate: Allocates shared memory buffers
+  - MultiPublish: Seals objects and updates metadata
+
+  All operations use shared memory for zero-copy.
+end note
+
+@enduml
