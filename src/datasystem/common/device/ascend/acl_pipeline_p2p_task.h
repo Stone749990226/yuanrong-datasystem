@@ -21,12 +21,11 @@
 #ifndef DATASYSTEM_COMMON_DEVICE_ACL_PIPELINE_P2P_TASK_H
 #define DATASYSTEM_COMMON_DEVICE_ACL_PIPELINE_P2P_TASK_H
 
-#include "datasystem/common/device/ascend/acl_pipeline_task.h"
-
 #include <map>
 
+#include "datasystem/common/device/ascend/acl_pipeline_task.h"
 #include "datasystem/common/device/device_pointer_wrapper.h"
-#include "datasystem/common/device/ascend/acl_resource_manager.h"
+#include "datasystem/common/device/resource_mgr.h"
 #include "datasystem/utils/status.h"
 
 namespace datasystem {
@@ -45,7 +44,7 @@ using PipeLineP2PResource = TwoPhaseAclPipeLineResource;
 
 class PipeLineP2PBase {
 public:
-    PipeLineP2PBase(AclResourceManager *aclResourceMgr) : aclResourceMgr_(aclResourceMgr)
+    PipeLineP2PBase(ResourceMgr *resourceMgr) : resourceMgr_(resourceMgr)
     {
     }
     virtual ~PipeLineP2PBase();
@@ -55,7 +54,7 @@ public:
 protected:
     Status AllocTransferBuffer(size_t objectSize, Blob &transBuffer, uint64_t &seq);
 
-    AclResourceManager *aclResourceMgr_;
+    ResourceMgr *resourceMgr_;
 
     struct CallbackData {
         PipeLineP2PBase *self;
@@ -70,7 +69,7 @@ protected:
 
 class PipeLineP2PSend : public TwoPhaseAclPipeLineBase<PipeLineP2PSend, P2PSendTask>, public PipeLineP2PBase {
 public:
-    PipeLineP2PSend(AclResourceManager *aclResourceMgr) : PipeLineP2PBase(aclResourceMgr)
+    PipeLineP2PSend(ResourceMgr *resourceMgr) : PipeLineP2PBase(resourceMgr)
     {
     }
     ~PipeLineP2PSend() = default;
@@ -111,7 +110,7 @@ struct P2PRecvTask {
 
 class PipeLineP2PRecv : public TwoPhaseAclPipeLineBase<PipeLineP2PRecv, P2PRecvTask>, public PipeLineP2PBase {
 public:
-    PipeLineP2PRecv(AclResourceManager *aclResourceMgr) : PipeLineP2PBase(aclResourceMgr)
+    PipeLineP2PRecv(ResourceMgr *resourceMgr) : PipeLineP2PBase(resourceMgr)
     {
     }
     ~PipeLineP2PRecv() = default;

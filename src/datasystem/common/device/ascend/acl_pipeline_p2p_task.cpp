@@ -23,6 +23,7 @@
 #include <numeric>
 
 #include "datasystem/common/device/comm_wrapper_base.h"
+#include "datasystem/common/device/resource_mgr.h"
 #include "datasystem/common/util/status_helper.h"
 #include "datasystem/common/util/timer.h"
 #include "datasystem/common/inject/inject_point.h"
@@ -53,7 +54,7 @@ PipeLineP2PBase::~PipeLineP2PBase()
     if (!transferUnitPools_.empty()) {
         LOG(WARNING) << "transfer buffer not release, remaining count:" << transferUnitPools_.size();
         for (auto &kv : transferUnitPools_) {
-            LOG_IF_ERROR(aclResourceMgr_->Device()->Free(kv.second), "Free send transfer pool failed");
+            LOG_IF_ERROR(resourceMgr_->Device()->Free(kv.second), "Free send transfer pool failed");
         }
     }
 }
@@ -75,7 +76,7 @@ Status PipeLineP2PBase::AllocTransferBuffer(size_t objectSize, Blob &transBuffer
                 transferVec = std::move(currentPool);
                 iter = transferUnitPools_.erase(iter);
             } else if (transferUnitPools_.size() > cacheSize) {
-                LOG_IF_ERROR(aclResourceMgr_->Device()->Free(currentPool), "Free transfer pool failed");
+                LOG_IF_ERROR(resourceMgr_->Device()->Free(currentPool), "Free transfer pool failed");
                 iter = transferUnitPools_.erase(iter);
             } else {
                 ++iter;
@@ -89,7 +90,7 @@ Status PipeLineP2PBase::AllocTransferBuffer(size_t objectSize, Blob &transBuffer
     const int maxRetrySec = 60;
     while (transferVec.empty()) {
         transferVec = std::move(std::vector<ShmUnit>(1));
-        auto rc = aclResourceMgr_->Device()->Allocate(
+        auto rc = resourceMgr_->Device()->Allocate(
             { BufferMetaInfo{ .blobCount = 1, .firstBlobOffset = 0, .size = objectSize } }, transferVec, true);
         if (rc.IsOk()) {
             break;

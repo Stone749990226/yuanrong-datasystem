@@ -38,7 +38,7 @@
 #include "datasystem/client/object_cache/device/device_memory_unit.h"
 #include "datasystem/client/object_cache/device/comm_factory.h"
 #include "datasystem/common/device/device_pointer_wrapper.h"
-#include "datasystem/common/device/ascend/acl_resource_manager.h"
+#include "datasystem/common/device/resource_mgr.h"
 #include "datasystem/common/device/ascend/cann_types.h"
 #include "datasystem/common/device/comm_wrapper.h"
 #include "datasystem/common/util/queue/blocking_queue.h"

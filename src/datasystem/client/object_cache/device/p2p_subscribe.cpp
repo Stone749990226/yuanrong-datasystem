@@ -26,7 +26,6 @@
 #include "datasystem/client/hetero_cache/device_buffer.h"
 #include "datasystem/common/device/ascend/acl_pipeline_p2p_task.h"
 #include "datasystem/common/device/device_pointer_wrapper.h"
-#include "datasystem/common/device/ascend/acl_resource_manager.h"
 #include "datasystem/common/device/comm_wrapper.h"
 #include "datasystem/common/inject/inject_point.h"
 #include "datasystem/common/perf/perf_manager.h"

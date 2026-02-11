@@ -14,286 +14,16 @@
  * limitations under the License.
  */
 
-#include "datasystem/common/device/ascend/acl_resource_manager.h"
+/**
+ * Description: Defines the ascend device resource.
+ */
 
-#include <securec.h>
-#include <cstring>
-#include <sstream>
-#include <string>
-
-#include "datasystem/common/device/ascend/ffts_dispatcher.h"
-#include "datasystem/common/inject/inject_point.h"
+#include "datasystem/common/device/ascend/acl_device_resource.h"
+#include "datasystem/common/device/resource_mgr.h"
 #include "datasystem/common/perf/perf_manager.h"
-#include "datasystem/common/util/format.h"
-#include "datasystem/common/util/memory.h"
-#include "datasystem/common/util/status_helper.h"
-#include "datasystem/common/util/strings_util.h"
-#include "datasystem/common/util/timer.h"
-#include "datasystem/utils/status.h"
-
-#define CHECK_ACL_RESULT(aclRet, apiName)                                                             \
-    do {                                                                                              \
-        int _aclRet = (aclRet);                                                                       \
-        if (_aclRet != 0) {                                                                           \
-            std::string errMsg = FormatString("%s api failed with error code %d ", apiName, _aclRet); \
-            return Status(StatusCode::K_ACL_ERROR, __LINE__, __FILE__, errMsg);                       \
-        }                                                                                             \
-    } while (false)
-
 namespace datasystem {
 const size_t MAX_FFTS_TASKS_COUNT = 8;
-
-void MemcopyConfig::Init()
-{
-    LOG_IF_ERROR(GetNumberFromEnv("DS_DEVICE_ACL_SIZE", deviceMemSize), "GetNumberFromEnv failed");
-    LOG_IF_ERROR(GetNumberFromEnv("DS_HOST_ACL_SIZE", hostMemSize), "GetNumberFromEnv failed");
-    LOG_IF_ERROR(GetPolicyFromEnv("DS_D2H_MEMCPY_POLICY", policyD2H), "GetPolicyFromEnv failed");
-    LOG_IF_ERROR(GetPolicyFromEnv("DS_H2D_MEMCPY_POLICY", policyH2D), "GetPolicyFromEnv failed");
-}
-
-std::string MemcopyConfig::ToString()
-{
-    std::stringstream ss;
-    ss << "MemcopyConfig { policyD2H:" << static_cast<int>(policyD2H);
-    ss << ", policyH2D:" << static_cast<int>(policyH2D);
-    ss << ", deviceMemSize:" << deviceMemSize;
-    ss << ", hostMemSize:" << hostMemSize;
-    ss << "}";
-    return ss.str();
-}
-
-Status MemcopyConfig::GetNumberFromEnv(const char *key, uint64_t &value)
-{
-    auto strValue = std::getenv(key);
-    RETURN_OK_IF_TRUE(strValue == nullptr);
-    try {
-         uint64_t ret = StrToUnsignedLong(strValue);
-        if (ret == 0) {
-            throw std::out_of_range("Memory should not be set to zero.");
-        }
-        value = ret;
-    } catch (std::invalid_argument &invalidArgument) {
-        RETURN_STATUS(StatusCode::K_RUNTIME_ERROR,
-                      FormatString("Env %s value %s parse to number failed, invalid argument", key, strValue));
-    } catch (std::out_of_range &outOfRange) {
-        RETURN_STATUS(StatusCode::K_RUNTIME_ERROR,
-                      FormatString("Env %s value %s parse to number failed, out of range", key, strValue));
-    }
-    return Status::OK();
-}
-
-Status MemcopyConfig::GetPolicyFromEnv(const char *key, MemcopyPolicy &policy)
-{
-    auto strValue = std::getenv(key);
-    RETURN_OK_IF_TRUE(strValue == nullptr);
-    std::string str = strValue;
-    if (str == "ffts") {
-        policy = MemcopyPolicy::FFTS;
-    } else if (str == "direct") {
-        policy = MemcopyPolicy::DIRECT;
-    } else if (str == "huge_ffts") {
-        policy = MemcopyPolicy::HUGE_FFTS;
-    } else {
-        RETURN_STATUS(K_INVALID, FormatString("Unknown memcopy policy %s from env %s", str, key));
-    }
-    return Status::OK();
-}
-
-Status AclMemMgrBase::Init()
-{
-    int index;
-    auto rc = acl::AclDeviceManager::Instance()->GetDeviceIdx(index);
-    if (rc.IsError()) {
-        LOG(WARNING) << "Not set device idx yet, return warning!";
-        return Status::OK();
-    }
-    waitPost_ = std::make_unique<WaitPost>();
-    return Status::OK();
-}
-
-Status AclMemMgrBase::Allocate(const std::vector<BufferMetaInfo> &bMeta, std::vector<ShmUnit> &memoryPool,
-                               bool skipRetry)
-{
-    std::lock_guard<std::mutex> lock(memPoolLock_);
-    uint64_t batchSize = bMeta.size();
-    uint64_t maxAllocateSize = 0;
-    if (type_ == AllocateType::DEV_DEVICE) {
-        for (const auto &meta : bMeta) {
-            maxAllocateSize = std::max(maxAllocateSize, meta.size);
-        }
-        batchSize = memoryPool.size();
-    }
-    uint32_t intervalMs = 100;
-    for (uint64_t i = 0; i < batchSize; i++) {
-        int retryNums = 10;
-        if (skipRetry) {
-            retryNums = 0;
-        }
-        Status rc = Status::OK();
-        do {
-            if (rc.IsError()) {
-                waitPost_->WaitFor(intervalMs);
-            }
-
-            size_t allocSize = (type_ == AllocateType::DEV_DEVICE) ? maxAllocateSize : bMeta[i].size;
-            rc = memoryPool[i].AllocateMemory(DEFAULT_TENANTID, allocSize, false, ServiceType::OBJECT, type_);
-            if (retryNums <= 0) {
-                break;
-            }
-            retryNums--;
-        } while (rc.IsError() && rc.GetCode() == K_OUT_OF_MEMORY);
-        if (skipRetry) {
-            RETURN_IF_NOT_OK(rc);
-        } else {
-            RETURN_IF_NOT_OK_PRINT_ERROR_MSG(rc, FormatString("Failed to allocate memory with size %d", bMeta[i].size));
-        }
-    }
-    return Status::OK();
-}
-
-Status AclMemMgrBase::Free(std::vector<ShmUnit> &memoryPool)
-{
-    std::lock_guard<std::mutex> lock(memPoolLock_);
-    uint64_t size = memoryPool.size();
-    for (uint64_t i = 0; i < size; i++) {
-        RETURN_IF_NOT_OK_PRINT_ERROR_MSG(memoryPool[i].FreeMemory(), "Failed to free memory");
-    }
-    return Status::OK();
-}
-
-AclHostMemMgr::AclHostMemMgr(Allocator *allocator) : AclMemMgrBase(allocator)
-{
-    type_ = AllocateType::DEV_HOST;
-    memoryCopyThreadPool_ = std::make_shared<ThreadPool>(0, GetRecommendedMemoryCopyThreadsNum());
-}
-
-Status AclHostMemMgr::HostMemoryCopy(void *dstData, uint64_t dstLength, void *srcData, uint64_t srcLength)
-{
-    CHECK_FAIL_RETURN_STATUS_PRINT_ERROR(dstData != nullptr, K_INVALID, "Can't put null dst ptr!");
-    CHECK_FAIL_RETURN_STATUS_PRINT_ERROR(srcData != nullptr, K_INVALID, "Can't put null src ptr!");
-    CHECK_FAIL_RETURN_STATUS_PRINT_ERROR(
-        dstLength > 0 && srcLength > 0, K_INVALID,
-        FormatString("length must greater than 0! dstLength : %lld, srcLength : %lld", dstLength, srcLength));
-    Status status = ::datasystem::MemoryCopy(static_cast<uint8_t *>(dstData), dstLength,
-                                             static_cast<const uint8_t *>(srcData), srcLength, memoryCopyThreadPool_);
-    CHECK_FAIL_RETURN_STATUS_PRINT_ERROR(status.IsOk(), K_RUNTIME_ERROR,
-                                         FormatString("Copy data to buffer failed, err: %s", status.ToString()));
-    return Status::OK();
-}
-
-AclResourceManager::AclResourceManager()
-{
-    deviceResources_.reserve(MAX_DEVICE_COUNT);
-    for (size_t deviceId = 0; deviceId < MAX_DEVICE_COUNT; deviceId++) {
-        deviceResources_.emplace_back(std::make_unique<DeviceResource>(deviceId));
-    }
-    config.Init();
-}
-
-Status AclResourceManager::Init()
-{
-    {
-        std::shared_lock<std::shared_timed_mutex> rlocker(mutex_);
-        if (aclHostMemMgr_ != nullptr && aclDeviceMemMgr_ != nullptr) {
-            return Status::OK();
-        }
-    }
-    INJECT_POINT_NO_RETURN("AclResourceManager.Init");
-
-    auto devInterImpl = acl::AclDeviceManager::Instance();
-    struct DevMemFuncRegister regFunc;
-
-    auto hostAllocFunc = [devInterImpl](void **ptr, size_t maxSize) -> Status {
-        return devInterImpl->aclrtMallocHost(&(*ptr), maxSize);
-    };
-    auto hostdestroyFunc = [](void *ptr, size_t destroySize) -> Status {
-        (void)destroySize;
-        if (ptr) {
-            // do not free in instance yet (destroy func : devInterImpl->aclrtFreeHost(ptr))
-            // destroy may cause interrupt with acl static data
-            return Status::OK();
-        }
-        return Status::OK();
-    };
-    auto devAllocFunc = [devInterImpl](void **ptr, size_t maxSize) -> Status {
-        return devInterImpl->aclrtMalloc(&(*ptr), maxSize, ACL_MEM_MALLOC_HUGE_FIRST);
-    };
-    auto devdestroyFunc = [](void *ptr, size_t destroySize) -> Status {
-        (void)destroySize;
-        if (ptr) {
-            // do not free in instance yet (destroy func : devInterImpl->aclrtFree(ptr)
-            // destroy may cause interrupt with acl static data
-            return Status::OK();
-        }
-        return Status::OK();
-    };
-    regFunc.devDeviceCreateFunc = devAllocFunc;
-    regFunc.devDeviceDestroyFunc = devdestroyFunc;
-    regFunc.devHostCreateFunc = hostAllocFunc;
-    regFunc.devHostDestroyFunc = hostdestroyFunc;
-
-    std::lock_guard<std::shared_timed_mutex> wlocker(mutex_);
-    auto *allocator = Allocator::Instance();
-    LOG(INFO) << config.ToString();
-    allocator->InitWithoutShm(config.deviceMemSize, config.hostMemSize, regFunc);
-
-    if (!aclHostMemMgr_) {
-        aclHostMemMgr_ = std::make_unique<AclHostMemMgr>(allocator);
-        auto rc = aclHostMemMgr_->Init();
-        if (rc.IsError()) {
-            aclHostMemMgr_.reset();
-        }
-        RETURN_IF_NOT_OK_PRINT_ERROR_MSG(rc, "Failed to init dev host mem.");
-    }
-
-    if (!aclDeviceMemMgr_) {
-        aclDeviceMemMgr_ = std::make_unique<AclDeviceMemMgr>(allocator);
-        auto rc = aclDeviceMemMgr_->Init();
-        if (rc.IsError()) {
-            aclDeviceMemMgr_.reset();
-        }
-        RETURN_IF_NOT_OK_PRINT_ERROR_MSG(rc, "Failed to init dev device mem.");
-    }
-    return Status::OK();
-}
-
-Status AclResourceManager::CreateAclRtStream(uint32_t deviceId, aclrtStream &stream, bool subscribeReport)
-{
-    CHECK_FAIL_RETURN_STATUS(
-        deviceId < MAX_DEVICE_COUNT, K_INVALID,
-        FormatString("Invalid device id %zu, exceed max device id %zu", deviceId, MAX_DEVICE_COUNT));
-    auto &deviceResource = deviceResources_[deviceId];
-    return deviceResource->CreateAclRtStream(subscribeReport, stream);
-}
-
-Status AclResourceManager::FreeAclRtStream(uint32_t deviceId, aclrtStream stream, bool subscribeReport)
-{
-    CHECK_FAIL_RETURN_STATUS(
-        deviceId < MAX_DEVICE_COUNT, K_INVALID,
-        FormatString("Invalid device id %zu, exceed max device id %zu", deviceId, MAX_DEVICE_COUNT));
-    auto &deviceResource = deviceResources_[deviceId];
-    return deviceResource->FreeAclRtStream(subscribeReport, stream);
-}
-
-Status AclResourceManager::CreateRtNotify(uint32_t deviceId, rtNotify_t &notify)
-{
-    CHECK_FAIL_RETURN_STATUS(
-        deviceId < MAX_DEVICE_COUNT, K_INVALID,
-        FormatString("Invalid device id %u, exceed max device id %zu", deviceId, MAX_DEVICE_COUNT));
-    auto &deviceResource = deviceResources_[deviceId];
-    return deviceResource->CreateRtNotify(notify);
-}
-
-Status AclResourceManager::FreeRtNotify(uint32_t deviceId, rtNotify_t notify)
-{
-    CHECK_FAIL_RETURN_STATUS(
-        deviceId < MAX_DEVICE_COUNT, K_INVALID,
-        FormatString("Invalid device id %zu, exceed max device id %zu", deviceId, MAX_DEVICE_COUNT));
-    auto &deviceResource = deviceResources_[deviceId];
-    return deviceResource->FreeRtNotify(notify);
-}
-
-Status AclResourceManager::DeviceResource::InitCallbackThread()
+Status AclDeviceResource::InitCallbackThread()
 {
     {
         std::shared_lock<std::shared_timed_mutex> rlocker(mutex_);
@@ -306,25 +36,7 @@ Status AclResourceManager::DeviceResource::InitCallbackThread()
     return Status::OK();
 }
 
-Status AclResourceManager::DeviceResource::InitFftsDispatcher()
-{
-    {
-        std::shared_lock<std::shared_timed_mutex> rlocker(mutex_);
-        RETURN_OK_IF_TRUE(fftsDispatcher_ != nullptr);
-    }
-
-    std::lock_guard<std::shared_timed_mutex> wlocker(mutex_);
-    RETURN_OK_IF_TRUE(fftsDispatcher_ != nullptr);
-    auto aclDeviceManager = acl::AclDeviceManager::Instance();
-    auto dispatcher = std::make_unique<ffts::FftsDispatcher>(deviceId_, aclDeviceManager);
-    CHECK_ACL_RESULT(dispatcher->Init(), "FftsDispatcher init");
-    CHECK_ACL_RESULT(dispatcher->CreateFftsCtxs(1), "FftsDispatcher CreateFftsCtxs");
-    CHECK_ACL_RESULT(dispatcher->SetFftsCtx(0), "FftsDispatcher SetFftsCtx");
-    fftsDispatcher_ = std::move(dispatcher);
-    return Status::OK();
-}
-
-Status AclResourceManager::DeviceResource::CreateAclRtStream(bool subscribeReport, aclrtStream &stream)
+Status AclDeviceResource::CreateAclRtStream(aclrtStream &stream, bool subscribeReport)
 {
     auto &queue = subscribeReport ? subscribeReportStreamQueue_ : streamQueue_;
     RETURN_IF_NOT_OK(InitCallbackThread());
@@ -342,7 +54,7 @@ Status AclResourceManager::DeviceResource::CreateAclRtStream(bool subscribeRepor
     return Status::OK();
 }
 
-Status AclResourceManager::DeviceResource::FreeAclRtStream(bool subscribeReport, aclrtStream stream)
+Status AclDeviceResource::FreeAclRtStream(aclrtStream stream, bool subscribeReport)
 {
     RETURN_OK_IF_TRUE(stream == nullptr);
     auto &queue = subscribeReport ? subscribeReportStreamQueue_ : streamQueue_;
@@ -362,7 +74,7 @@ Status AclResourceManager::DeviceResource::FreeAclRtStream(bool subscribeReport,
     return Status::OK();
 }
 
-Status AclResourceManager::DeviceResource::CreateRtNotify(rtNotify_t &notify)
+Status AclDeviceResource::CreateRtNotify(rtNotify_t &notify)
 {
     auto aclDeviceManager = acl::AclDeviceManager::Instance();
     std::lock_guard<std::shared_timed_mutex> wlocker(mutex_);
@@ -375,7 +87,7 @@ Status AclResourceManager::DeviceResource::CreateRtNotify(rtNotify_t &notify)
     return Status::OK();
 }
 
-Status AclResourceManager::DeviceResource::FreeRtNotify(rtNotify_t notify)
+Status AclDeviceResource::FreeRtNotify(rtNotify_t notify)
 {
     RETURN_OK_IF_TRUE(notify == nullptr);
     auto aclDeviceManager = acl::AclDeviceManager::Instance();
@@ -388,14 +100,18 @@ Status AclResourceManager::DeviceResource::FreeRtNotify(rtNotify_t notify)
     return Status::OK();
 }
 
-FftsPipelineCopierBase::FftsPipelineCopierBase(int32_t deviceId, AclResourceManager *aclResourceMgr,
+FftsPipelineCopierBase::FftsPipelineCopierBase(uint32_t deviceId, AclDeviceResource &deviceResource,
+                                               HostMemMgr *hostMemMgr, DeviceMemMgr *deviceMemMgr,
                                                const std::vector<BufferMetaInfo> &bufferMetas, ThreadPool *h2hCopyPool,
-                                               ThreadPool *fftsCopyPool)
-    : aclResourceMgr_(aclResourceMgr),
-      deviceId_(deviceId),
+                                               ThreadPool *fftsCopyPool, bool skipH2HMemcpy)
+    : deviceId_(deviceId),
+      deviceResource_(deviceResource),
+      hostMemMgr_(hostMemMgr),
+      deviceMemMgr_(deviceMemMgr),
       bufferMetas_(bufferMetas),
       h2hCopyPool_(h2hCopyPool),
       fftsCopyPool_(fftsCopyPool),
+      skipH2HMemcpy_(skipH2HMemcpy),
       finishCount_(0)
 {
     auto ret = memset_s(&resource_, sizeof(AclResource), 0, sizeof(AclResource));
@@ -404,28 +120,25 @@ FftsPipelineCopierBase::FftsPipelineCopierBase(int32_t deviceId, AclResourceMana
     }
     aclDeviceManager_ = acl::AclDeviceManager::Instance();
     fftsDispatcher_ = std::make_unique<ffts::FftsDispatcher>(deviceId, aclDeviceManager_);
-    skipH2HMemcpy_ = aclResourceMgr_->GetD2HPolicy() == aclResourceMgr_->GetH2DPolicy()
-                     && aclResourceMgr_->GetD2HPolicy() == MemcopyPolicy::HUGE_FFTS;
 }
 
 FftsPipelineCopierBase::~FftsPipelineCopierBase()
 {
     PerfPoint point(PerfKey::CLIENT_FREE_STREAM_NOTIFY);
     try {
-        LOG_IF_ERROR(aclResourceMgr_->FreeAclRtStream(deviceId_, resource_.primaryStream, resource_.subscribeReport),
+        LOG_IF_ERROR(deviceResource_.FreeAclRtStream(resource_.primaryStream, resource_.subscribeReport),
                      "FreeAclRtStream failed");
-        LOG_IF_ERROR(aclResourceMgr_->FreeAclRtStream(deviceId_, resource_.secondaryStream, false),
-                     "FreeAclRtStream failed");
+        LOG_IF_ERROR(deviceResource_.FreeAclRtStream(resource_.secondaryStream, false), "FreeAclRtStream failed");
         for (size_t i = 0; i < FFTS_PIPELINE; i++) {
-            LOG_IF_ERROR(aclResourceMgr_->FreeRtNotify(deviceId_, resource_.toDestDone[i]), "FreeRtNotify failed");
-            LOG_IF_ERROR(aclResourceMgr_->FreeRtNotify(deviceId_, resource_.toPinDone[i]), "FreeRtNotify failed");
+            LOG_IF_ERROR(deviceResource_.FreeRtNotify(resource_.toDestDone[i]), "FreeRtNotify failed");
+            LOG_IF_ERROR(deviceResource_.FreeRtNotify(resource_.toPinDone[i]), "FreeRtNotify failed");
         }
     } catch (const std::exception &e) {
         LOG(ERROR) << e.what();
     }
     point.RecordAndReset(PerfKey::CLIENT_FREE_TRANS_BUFFERS);
-    LOG_IF_ERROR(aclResourceMgr_->Host()->Free(transferHostPool_), "Free transferHostMem failed");
-    LOG_IF_ERROR(aclResourceMgr_->Device()->Free(transferDevicePool_), "Free transferDeviceMem failed");
+    LOG_IF_ERROR(hostMemMgr_->Free(transferHostPool_), "Free transferHostMem failed");
+    LOG_IF_ERROR(deviceMemMgr_->Free(transferDevicePool_), "Free transferDeviceMem failed");
     point.Record();
 }
 
@@ -454,12 +167,12 @@ Status FftsPipelineCopierBase::AllocAndInitTransferBuffers(const std::vector<Buf
         transferHostBuffers_.clear();
         transferHostBuffers_.assign(hostBuffer.begin(), hostBuffer.end());
     } else {
-        RETURN_IF_NOT_OK(aclResourceMgr_->Host()->Allocate(bufferMetas_, transferHostPool_));
+        RETURN_IF_NOT_OK(hostMemMgr_->Allocate(bufferMetas_, transferHostPool_));
         RETURN_IF_NOT_OK_PRINT_ERROR_MSG(GetBufferViews(count, transferHostPool_, transferHostBuffers_),
                                          "GetBufferViews for host buffer failed.");
     }
 
-    RETURN_IF_NOT_OK(aclResourceMgr_->Device()->Allocate(bufferMetas_, transferDevicePool_));
+    RETURN_IF_NOT_OK(deviceMemMgr_->Allocate(bufferMetas_, transferDevicePool_));
     RETURN_IF_NOT_OK_PRINT_ERROR_MSG(GetBufferViews(FFTS_PIPELINE, transferDevicePool_, transferDeviceBuffers_),
                                      "GetBufferViews for device buffer failed.");
 
@@ -476,16 +189,15 @@ Status FftsPipelineCopierBase::InitAclResource(bool subscribeReport)
     CHECK_ACL_RESULT(fftsDispatcher_->SetFftsCtx(0), "FftsDispatcher SetFftsCtx");
 
     point.RecordAndReset(PerfKey::CLIENT_CREATE_STREAM_NOTIFY);
-    RETURN_IF_NOT_OK_PRINT_ERROR_MSG(
-        aclResourceMgr_->CreateAclRtStream(deviceId_, resource_.primaryStream, subscribeReport),
-        "CreateAclRtStream failed");
-    RETURN_IF_NOT_OK_PRINT_ERROR_MSG(aclResourceMgr_->CreateAclRtStream(deviceId_, resource_.secondaryStream, false),
+    RETURN_IF_NOT_OK_PRINT_ERROR_MSG(deviceResource_.CreateAclRtStream(resource_.primaryStream, subscribeReport),
+                                     "CreateAclRtStream failed");
+    RETURN_IF_NOT_OK_PRINT_ERROR_MSG(deviceResource_.CreateAclRtStream(resource_.secondaryStream, false),
                                      "CreateAclRtStream failed");
 
     for (size_t i = 0; i < FFTS_PIPELINE; i++) {
-        RETURN_IF_NOT_OK_PRINT_ERROR_MSG(aclResourceMgr_->CreateRtNotify(deviceId_, resource_.toDestDone[i]),
+        RETURN_IF_NOT_OK_PRINT_ERROR_MSG(deviceResource_.CreateRtNotify(resource_.toDestDone[i]),
                                          "CreateRtNotify failed");
-        RETURN_IF_NOT_OK_PRINT_ERROR_MSG(aclResourceMgr_->CreateRtNotify(deviceId_, resource_.toPinDone[i]),
+        RETURN_IF_NOT_OK_PRINT_ERROR_MSG(deviceResource_.CreateRtNotify(resource_.toPinDone[i]),
                                          "CreateRtNotify failed");
     }
     resource_.subscribeReport = subscribeReport;
@@ -507,10 +219,12 @@ Status FftsPipelineCopierBase::WaitFinish()
     return aclDeviceManager_->RtSynchronizeStream(resource_.primaryStream);
 }
 
-FftsPipelineH2DCopier::FftsPipelineH2DCopier(int32_t deviceId, AclResourceManager *aclResourceMgr,
+FftsPipelineH2DCopier::FftsPipelineH2DCopier(uint32_t deviceId, AclDeviceResource &deviceResource,
+                                             HostMemMgr *hostMemMgr, DeviceMemMgr *deviceMemMgr,
                                              const std::vector<BufferMetaInfo> &bufferMetas, ThreadPool *h2hCopyPool,
-                                             ThreadPool *fftsCopyPool)
-    : FftsPipelineCopierBase(deviceId, aclResourceMgr, bufferMetas, h2hCopyPool, fftsCopyPool),
+                                             ThreadPool *fftsCopyPool, bool skipH2HMemcpy)
+    : FftsPipelineCopierBase(deviceId, deviceResource, hostMemMgr, deviceMemMgr, bufferMetas, h2hCopyPool, fftsCopyPool,
+                             skipH2HMemcpy),
       blobOffset_(0),
       submitCount_(0)
 {
@@ -549,8 +263,8 @@ Status FftsPipelineH2DCopier::ExecuteMemcpy(const std::vector<BufferView> &devic
         futs.emplace_back(h2hCopyPool_->Submit([this, i, &hostBuffers, &deviceBuffers] {
             PerfPoint::RecordElapsed(PerfKey::CLIENT_H2D_H2H_MEMLEN, hostBuffers[i].size);
             PerfPoint point(PerfKey::CLIENT_H2D_H2H_MEMCPY);
-            Status rc = aclResourceMgr_->Host()->HostMemoryCopy(
-                transferHostBuffers_[i].ptr, transferHostBuffers_[i].size, hostBuffers[i].ptr, hostBuffers[i].size);
+            Status rc = hostMemMgr_->HostMemoryCopy(transferHostBuffers_[i].ptr, transferHostBuffers_[i].size,
+                                                    hostBuffers[i].ptr, hostBuffers[i].size);
             point.RecordAndReset(PerfKey::CLIENT_H2D_H2H_NOTIFY);
             AddFftsNotifyTask(i, deviceBuffers, rc.IsOk());
             return rc;
@@ -693,10 +407,12 @@ Status FftsPipelineH2DCopier::SubmitToStream(const std::vector<BufferView> &srcB
     return Status::OK();
 }
 
-FftsPipelineD2HCopier::FftsPipelineD2HCopier(int32_t deviceId, AclResourceManager *aclResourceMgr,
+FftsPipelineD2HCopier::FftsPipelineD2HCopier(uint32_t deviceId, AclDeviceResource &deviceResource,
+                                             HostMemMgr *hostMemMgr, DeviceMemMgr *deviceMemMgr,
                                              const std::vector<BufferMetaInfo> &bufferMetas, ThreadPool *h2hCopyPool,
-                                             ThreadPool *fftsCopyPool)
-    : FftsPipelineCopierBase(deviceId, aclResourceMgr, bufferMetas, h2hCopyPool, fftsCopyPool)
+                                             ThreadPool *fftsCopyPool, bool skipH2HMemcpy)
+    : FftsPipelineCopierBase(deviceId, deviceResource, hostMemMgr, deviceMemMgr, bufferMetas, h2hCopyPool, fftsCopyPool,
+                             skipH2HMemcpy)
 {
 }
 
@@ -764,8 +480,8 @@ Status FftsPipelineD2HCopier::ExecuteMemcpy(const std::vector<BufferView> &hostB
                 PerfPoint::RecordElapsed(PerfKey::CLIENT_D2H_H2H_MEMLEN, hostBuffers[index].size);
                 PerfPoint point(PerfKey::CLIENT_D2H_H2H_MEMCPY);
                 Status rc =
-                    aclResourceMgr_->Host()->HostMemoryCopy(hostBuffers[index].ptr, hostBuffers[index].size,
-                                                            transferHostBuffers_[index].ptr, hostBuffers[index].size);
+                    hostMemMgr_->HostMemoryCopy(hostBuffers[index].ptr, hostBuffers[index].size,
+                                                         transferHostBuffers_[index].ptr, hostBuffers[index].size);
                 return rc;
             }));
         }

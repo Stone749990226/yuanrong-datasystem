@@ -39,7 +39,7 @@ constexpr int WARM_UP_DATA_COUNT = 1;
 class CommWrapperBase : public DevicePointerWrapper {
 public:
     explicit CommWrapperBase(const std::string &commId, int localDeviceId, int remoteDeviceId,
-                             std::shared_ptr<HcclCommMagr> &threadControl, AclResourceManager *aclResourceMgr);
+                             std::shared_ptr<HcclCommMagr> &threadControl, ResourceMgr *resourceMgr);
 
     ~CommWrapperBase();
 
@@ -219,7 +219,7 @@ private:
     Status CheckTranPointer(const void *pointer, const std::string &pointerName);
 
     DeviceManagerBase *deviceImpl_;
-    AclResourceManager *aclResourceMgr_;
+    ResourceMgr *resourceMgr_;
     std::shared_ptr<acl::TwoPhaseAclPipeLineResource> resource_;
     std::unique_ptr<acl::PipeLineP2PSend> sender_;
     std::unique_ptr<acl::PipeLineP2PRecv> receiver_;

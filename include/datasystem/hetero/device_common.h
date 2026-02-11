@@ -39,6 +39,24 @@ struct DeviceBlobList {
     int32_t srcOffset = 0;  // Sender's Data Starting Offset (Bytes)
 };
 
+struct DataMetaInfo {
+    size_t blobCount;
+    size_t firstBlobOffset;
+    void *ptr;
+    size_t size;
+};
+
+struct BufferView {
+    void *ptr;
+    size_t size;
+};
+
+struct BufferMetaInfo {
+    size_t blobCount;
+    size_t firstBlobOffset;
+    size_t size;
+};
+
 struct Tensor {
     uint64_t ptr;
     uint32_t elemSize;

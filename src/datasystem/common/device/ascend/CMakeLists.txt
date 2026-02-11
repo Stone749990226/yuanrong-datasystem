@@ -7,7 +7,8 @@ add_library(common_acl_device STATIC
     p2phccl_comm_wrapper.cpp
     ffts_dispatcher.cpp
     acl_pipeline_p2p_task.cpp
-    acl_resource_manager.cpp
+    acl_device_resource.cpp
+    acl_memcpy_pool.cpp
     callback_thread.cpp
 )
 target_link_libraries(common_acl_device PRIVATE ${ACL_DEVICE_DEPEND_LIBS})

@@ -65,7 +65,7 @@ protected:
 
 class CommFactory : public ClientDeviceCurd {
 public:
-    CommFactory(std::shared_ptr<object_cache::IClientWorkerApi> workerApi, AclResourceManager *aclResourceMgr);
+    CommFactory(std::shared_ptr<object_cache::IClientWorkerApi> workerApi, ResourceMgr *resourceMgr);
 
     void ShutDown();
 
@@ -215,7 +215,7 @@ private:
     // To prevent two threads from trying to create a communication domain at the same time.
     std::shared_timed_mutex mutex_;
     std::shared_ptr<HcclCommMagr> commThreadControl_;
-    AclResourceManager *aclResourceMgr_;
+    ResourceMgr *resourceMgr_;
 };
 }  // namespace datasystem
 
