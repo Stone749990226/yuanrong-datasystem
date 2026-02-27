@@ -40,7 +40,7 @@
 #include "datasystem/common/util/thread.h"
 #include "datasystem/utils/status.h"
 
-#ifndef BUILD_HETERO
+#ifndef USE_NPU
 #define ACL_PLUGIN_SHA256 "Unknown"
 #else
 #include "datasystem/common/device/ascend/plugin/acl_plugin_sha256.h"
@@ -70,7 +70,7 @@ AclDeviceManager *AclDeviceManager::Instance()
 
 void AclDeviceManager::Init()
 {
-#ifdef BUILD_HETERO
+#ifdef USE_NPU
     auto traceId = Trace::Instance().GetTraceID();
     loadPluginThread_ = std::make_unique<Thread>([this, traceId]() {
         TraceGuard traceGuard = Trace::Instance().SetTraceNewID(traceId);

@@ -252,7 +252,7 @@ void P2PSubscribe::P2PAckPut(std::shared_ptr<P2PAckReq> &p2pAckReq)
         }
         p2pPutRequest->DestroyEvent();
         VLOG(1) << FormatString("Object key %s completed the sending procedure", objId);
-    } else if (rc.GetCode() == K_ACL_ERROR) {
+    } else if (rc.GetCode() == K_ACL_ERROR || rc.GetCode() == K_CUDA_ERROR) {
         p2pAckQueue_.Push(p2pAckReq);
     } else {
         const auto &bufferInfo = p2pPutRequest->GetBufferInfo();

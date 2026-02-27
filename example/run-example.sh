@@ -107,6 +107,7 @@ if [ "x$run_python" == "xon" ]; then
     python ${example_python_dir}/kv_client_example.py --host "127.0.0.1" --port "${worker_port}"
     if [ "x$run_hetero" == "xon" ]; then
         python ${example_python_dir}/hetero_client_example.py --host "127.0.0.1" --port "${worker_port}"
+        python ${example_python_dir}/hetero_client_example_gpu.py --host "127.0.0.1" --port "${worker_port}"
         python ${example_python_dir}/ds_tensor_client_example.py --host "127.0.0.1" --port "${worker_port}"
     fi
 fi
