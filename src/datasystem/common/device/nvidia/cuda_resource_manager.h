@@ -26,25 +26,25 @@ namespace datasystem {
 
 class CudaResourceManager : public DeviceResourceManager {
 public:
-    CudaResourceManager() = default;
+    CudaResourceManager();
     ~CudaResourceManager() = default;
 
-    Status MemcpyBatchD2H(const std::vector<DeviceBlobList> &devBlobList, std::vector<Buffer *> &bufferList) override
-    {
-        (void)devBlobList;
-        (void)bufferList;
-        return Status::OK();
-    }
-    Status MemcpyBatchH2D(const std::vector<DeviceBlobList> &devBlobList, std::vector<Buffer *> &bufferList) override
-    {
-        (void)devBlobList;
-        (void)bufferList;
-        return Status::OK();
-    }
-    void SetPolicyByHugeTlb(bool enableHugeTlb) override
-    {
-        (void)enableHugeTlb;
-    }
+    Status MemcpyBatchD2H(const std::vector<DeviceBlobList> &devBlobList, std::vector<Buffer *> &bufferList) override;
+    Status MemcpyBatchH2D(const std::vector<DeviceBlobList> &devBlobList, std::vector<Buffer *> &bufferList) override;
+    void SetPolicyByHugeTlb(bool enableHugeTlb) override;
+
+private:
+    /**
+     * @brief Batch memory copy between host and device using CUDA streams.
+     * @param[in] devBlobList List of device blob lists (blobs on the same GPU card).
+     * @param[in,out] bufferList List of host-side buffers.
+     * @param[in] copyKind The direction of the copy (HOST_TO_DEVICE or DEVICE_TO_HOST).
+     * @return Status of the batch copy operation.
+     */
+    Status CudaMemcpyBatch(const std::vector<DeviceBlobList> &devBlobList, std::vector<Buffer *> &bufferList,
+                           MemcpyKind copyKind);
+
+    DeviceManagerBase *devManager_ = nullptr;
 };
 }  // namespace datasystem
 

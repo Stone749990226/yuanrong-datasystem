@@ -35,6 +35,7 @@
 
 #if defined(USE_NPU) || defined(USE_GPU)
 #include <glob.h>
+#include <cstdlib>
 #endif
 
 namespace datasystem {
@@ -63,10 +64,12 @@ public:
     static DeviceBackend ProbeBackend()
     {
 #ifdef USE_NPU
-        if (HasDevNode("/dev/davinci[0-9]*")) return DeviceBackend::NPU;
+        if (HasDevNode("/dev/davinci[0-9]*"))
+            return DeviceBackend::NPU;
 #endif
 #ifdef USE_GPU
-        if (HasDevNode("/dev/nvidia[0-9]*")) return DeviceBackend::GPU;
+        if (HasDevNode("/dev/nvidia[0-9]*") || HasNvidiaSmi())
+            return DeviceBackend::GPU;
 #endif
         return DeviceBackend::UNKNOWN;
     }
@@ -87,6 +90,18 @@ private:
 #endif
     }
 
+    static bool HasNvidiaSmi()
+    {
+#ifdef USE_GPU
+        // Check if nvidia-smi command is available and can detect GPUs
+        // This works in both native Linux and WSL2 environments
+        int ret = system("nvidia-smi -L > /dev/null 2>&1");
+        return (ret == 0);
+#else
+        return false;
+#endif
+    }
+
     static DeviceManagerBase *Detect()
     {
         bool hasNpu = false;
@@ -95,7 +110,7 @@ private:
         hasNpu = HasDevNode("/dev/davinci[0-9]*");
 #endif
 #ifdef USE_GPU
-        hasGpu = HasDevNode("/dev/nvidia[0-9]*");
+        hasGpu = HasDevNode("/dev/nvidia[0-9]*") || HasNvidiaSmi();
 #endif
         if (hasNpu && hasGpu) {
             LOG(ERROR) << "Both NPU (/dev/davinci*) and GPU (/dev/nvidia*) devices detected. "
@@ -121,7 +136,7 @@ private:
                       " /dev/davinci[0-9]*"
 #endif
 #ifdef USE_GPU
-                      " /dev/nvidia[0-9]*"
+                      " /dev/nvidia[0-9]* and nvidia-smi"
 #endif
                       ". Ensure the device driver is installed and "
                       "the device node exists.";
@@ -130,4 +145,4 @@ private:
 };
 
 }  // namespace datasystem
-#endif // DATASYSTEM_COMMON_DEVICE_DEVICE_MANAGER_FACTORY_H
+#endif  // DATASYSTEM_COMMON_DEVICE_DEVICE_MANAGER_FACTORY_H

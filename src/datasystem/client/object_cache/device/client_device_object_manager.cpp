@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "datasystem/client/object_cache/client_worker_api/iclient_worker_api.h"
-#include "datasystem/common/device/ascend/acl_resource_manager.h"
+#include "datasystem/common/device/device_resource_manager_factory.h"
 #include "datasystem/client/object_cache/device/device_memory_unit.h"
 #include "datasystem/client/object_cache/device/p2p_subscribe.h"
 #include "datasystem/client/object_cache/object_client_impl.h"
@@ -47,9 +47,7 @@ ClientDeviceObjectManager::ClientDeviceObjectManager(ObjectClientImpl *impl)
       objClientImpl_(impl),
       clientDevOJTimeoutMs_(impl->requestTimeoutMs_)
 {
-    // According to device type, we should create corresponding resource manage.
-    // Now only ACL resource manager is created.
-    resourceMgr_ = std::make_unique<AclResourceManager>();
+    resourceMgr_ = DeviceResourceManagerFactory::Create();
 }
 
 Status ClientDeviceObjectManager::Init()
