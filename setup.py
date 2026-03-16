@@ -27,7 +27,7 @@ from setuptools import find_namespace_packages, setup
 from setuptools.command.build_py import build_py
 from setuptools.command.egg_info import egg_info
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
-from wheel.vendored.packaging import tags
+from packaging import tags
 
 root_dir = os.path.dirname(os.path.realpath(__file__))
 

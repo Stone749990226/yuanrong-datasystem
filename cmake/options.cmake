@@ -9,5 +9,5 @@ option(ENABLE_STRIP "Discard symbols from object files" OFF)
 option(BUILD_WITH_URMA "Build with urma" OFF)
 
 # Hetero device options (requires BUILD_HETERO=ON)
-option(BUILD_HETERO_NPU "Build NPU (Ascend) heterogeneous support" ON)
+option(BUILD_HETERO_NPU "Build NPU (Ascend) heterogeneous support" OFF)
 option(BUILD_HETERO_GPU "Build GPU (CUDA) heterogeneous support" ON)

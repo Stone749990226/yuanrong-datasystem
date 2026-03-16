@@ -386,6 +386,7 @@ function strip_symbols() {
     basename=$(basename "${file}")
     if [[ ! -L "${file}" ]] && [[ ! -d "${file}" ]] && [[ "x${type}" != "xtext" ]] && [[ "x${basename}" != "xlibacl_plugin.so" ]]; then
       echo "---- start to strip ${file}"
+      chmod u+w "${file}" || return 1
       objcopy --only-keep-debug "${file}" "${dest_dir}/${basename}.sym"
       objcopy --add-gnu-debuglink="${dest_dir}/${basename}.sym" "${file}"
       objcopy --strip-all "${file}"

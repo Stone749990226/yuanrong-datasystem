@@ -92,8 +92,7 @@ int MemCopyH2D(void *dst, const void *src, size_t srcSize)
 int DSCudartMemcpyAsync(void *dst, const void *src, size_t count, cudaMemcpyKind kind,
                        cudaStream_t stream)
 {
-    (void)kind;
-    return cudaMemcpyAsync(dst, src, count, cudaMemcpyDeviceToDevice, stream);
+    return cudaMemcpyAsync(dst, src, count, kind, stream);
 }
 
 

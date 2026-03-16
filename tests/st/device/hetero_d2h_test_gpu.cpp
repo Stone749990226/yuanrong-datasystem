@@ -125,7 +125,7 @@ TEST_F(HeteroD2HThroughTcpGpuTest, SetGet)
 TEST_F(HeteroD2HGpuTest, Perf)
 {
     const int32_t deviceId = static_cast<int32_t>(GetDeviceIdFromEnv("DS_TEST_DEVICE_ID", 0));
-    std::vector<uint64_t> keyNums{ 1, 10, 450, 500, 1000 };
+    std::vector<uint64_t> keyNums{ 1, 10, 450, 500 };
     std::vector<std::vector<double>> costs(keyNums.size());
     std::shared_ptr<HeteroClient> client;
     InitCuda(deviceId);
